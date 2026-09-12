@@ -4,6 +4,7 @@ const Customer = require('../models/Customer');
 const Inventory = require('../models/Inventory');
 const Notification = require('../models/Notification');
 const ActivityLog = require('../models/ActivityLog');
+const { generateInvoicePDF } = require('../utils/pdfExport');
 
 const generateInvoiceNumber = () => {
   const prefix = 'INV';
@@ -43,6 +44,15 @@ exports.getSale = async (req, res, next) => {
       .populate('createdBy', 'name');
     if (!sale) return res.status(404).json({ success: false, message: 'Sale not found' });
     res.json({ success: true, sale });
+  } catch (err) { next(err); }
+};
+
+exports.getSaleInvoice = async (req, res, next) => {
+  try {
+    const sale = await Sale.findById(req.params.id)
+      .populate('customer', 'name');
+    if (!sale) return res.status(404).json({ success: false, message: 'Sale not found' });
+    generateInvoicePDF(sale, res);
   } catch (err) { next(err); }
 };
 
