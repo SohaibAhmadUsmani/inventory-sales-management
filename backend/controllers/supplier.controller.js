@@ -46,6 +46,35 @@ exports.deleteSupplier = async (req, res, next) => {
 exports.getSupplierPurchases = async (req, res, next) => {
   try {
     const purchases = await Purchase.find({ supplier: req.params.id }).sort('-createdAt');
-    res.json({ success: true, count: purchases.length, purchases });
+    const summary = purchases.reduce((acc, p) => {
+      acc.totalCost += p.totalCost;
+      acc[p.paymentStatus] = (acc[p.paymentStatus] || 0) + p.totalCost;
+      return acc;
+    }, { totalCost: 0, paid: 0, pending: 0, partial: 0 });
+    res.json({ success: true, count: purchases.length, purchases, summary });
+  } catch (err) { next(err); }
+};
+
+exports.getSupplierStats = async (req, res, next) => {
+  try {
+    const [total, active, agg, pendingPOs] = await Promise.all([
+      Supplier.countDocuments({ isActive: true }),
+      Supplier.countDocuments({ isActive: true, totalPurchases: { $gt: 0 } }),
+      Supplier.aggregate([
+        { $match: { isActive: true } },
+        { $group: { _id: null, totalSpend: { $sum: '$totalPurchases' } } },
+      ]),
+      Purchase.countDocuments({ status: 'ordered' }),
+    ]);
+
+    res.json({
+      success: true,
+      stats: {
+        total,
+        active,
+        totalSpend: agg[0]?.totalSpend || 0,
+        pendingPOs,
+      },
+    });
   } catch (err) { next(err); }
 };

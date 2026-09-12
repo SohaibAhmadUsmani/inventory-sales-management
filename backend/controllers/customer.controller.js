@@ -49,3 +49,31 @@ exports.getCustomerPurchases = async (req, res, next) => {
     res.json({ success: true, count: sales.length, sales });
   } catch (err) { next(err); }
 };
+
+exports.getCustomerStats = async (req, res, next) => {
+  try {
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const [total, active, newThisMonth, agg] = await Promise.all([
+      Customer.countDocuments({ isActive: true }),
+      Customer.countDocuments({ isActive: true, totalOrders: { $gt: 0 } }),
+      Customer.countDocuments({ isActive: true, createdAt: { $gte: startOfMonth } }),
+      Customer.aggregate([
+        { $match: { isActive: true } },
+        { $group: { _id: null, totalLifetimeValue: { $sum: '$totalSpending' } } },
+      ]),
+    ]);
+
+    res.json({
+      success: true,
+      stats: {
+        total,
+        active,
+        newThisMonth,
+        totalLifetimeValue: agg[0]?.totalLifetimeValue || 0,
+      },
+    });
+  } catch (err) { next(err); }
+};
