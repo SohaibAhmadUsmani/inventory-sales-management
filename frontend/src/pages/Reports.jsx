@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import api from '../services/api';
 import { toast } from 'react-toastify';
+import PageHeader from '../components/PageHeader';
+import { FiDownload, FiFileText } from 'react-icons/fi';
 
 const TABS = [
   { key: 'sales', label: 'Sales' },
@@ -12,8 +14,6 @@ const TABS = [
 ];
 
 const money = (n) => `$${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-const selectStyle = { padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 14 };
 
 export default function Reports() {
   const [activeTab, setActiveTab] = useState('sales');
@@ -75,20 +75,23 @@ export default function Reports() {
       .finally(() => setLoading(false));
   };
 
+  const triggerDownload = (blob, filename) => {
+    const url = window.URL.createObjectURL(new Blob([blob]));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
   const downloadExport = async (format) => {
     const key = `${activeTab}-${format}`;
     setExporting(key);
     try {
       const res = await api.get(`/reports/${activeTab}/export/${format}`, { params: activeParams(), responseType: 'blob' });
-      const blob = new Blob([res.data]);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${activeTab}_report.${format === 'excel' ? 'xlsx' : 'pdf'}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      triggerDownload(res.data, `${activeTab}_report.${format === 'excel' ? 'xlsx' : 'pdf'}`);
     } catch (err) {
       toast.error('Export failed');
     } finally {
@@ -104,15 +107,7 @@ export default function Reports() {
         params: { month: now.getMonth() + 1, year: now.getFullYear() },
         responseType: 'blob',
       });
-      const blob = new Blob([res.data]);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'Monthly_Business_Report.pdf';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      triggerDownload(res.data, 'Monthly_Business_Report.pdf');
     } catch (err) {
       toast.error('Export failed');
     } finally {
@@ -120,126 +115,135 @@ export default function Reports() {
     }
   };
 
+  const headerActions = (
+    <button className="ui-btn-dark" onClick={downloadMonthlyReport} disabled={exporting === 'monthly'}>
+      <FiFileText size={16} />
+      {exporting === 'monthly' ? 'Generating...' : 'Monthly Business Report'}
+    </button>
+  );
+
   return (
-    <div>
-      <div className="page-header">
-        <h1>Reports</h1>
-        <button className="btn btn-secondary" onClick={downloadMonthlyReport} disabled={exporting === 'monthly'}>
-          {exporting === 'monthly' ? 'Generating...' : 'Monthly Business Report (PDF)'}
-        </button>
+    <>
+      <PageHeader title="Reports" subtitle="Generate, filter and export detailed business reports" actions={headerActions} />
+      <div className="ui-tabs">
+        {TABS.map(t => (
+          <button key={t.key} className={`ui-tab${activeTab === t.key ? ' active' : ''}`} onClick={() => switchTab(t.key)}>
+            {t.label}
+          </button>
+        ))}
       </div>
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-          {TABS.map(t => (
-            <button key={t.key} className={`btn ${activeTab === t.key ? 'btn-primary' : 'btn-secondary'}`} onClick={() => switchTab(t.key)}>
-              {t.label}
-            </button>
-          ))}
-        </div>
+      <div className="ui-filter-bar">
+        {['sales', 'products', 'profit', 'suppliers'].includes(activeTab) && (
+          <>
+            <input type="date" className="ui-filter-input" value={filters.startDate} onChange={e => updateFilter('startDate', e.target.value)} />
+            <input type="date" className="ui-filter-input" value={filters.endDate} onChange={e => updateFilter('endDate', e.target.value)} />
+          </>
+        )}
 
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          {['sales', 'products', 'profit', 'suppliers'].includes(activeTab) && (
-            <>
-              <input type="date" value={filters.startDate} onChange={e => updateFilter('startDate', e.target.value)} style={selectStyle} />
-              <input type="date" value={filters.endDate} onChange={e => updateFilter('endDate', e.target.value)} style={selectStyle} />
-            </>
-          )}
+        {activeTab === 'sales' && (
+          <>
+            <select className="ui-filter-input" value={filters.groupBy} onChange={e => updateFilter('groupBy', e.target.value)}>
+              <option value="day">Daily</option>
+              <option value="week">Weekly</option>
+              <option value="month">Monthly</option>
+            </select>
+            <select className="ui-filter-input" value={filters.customer} onChange={e => updateFilter('customer', e.target.value)}>
+              <option value="">All Customers</option>
+              {customers.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
+            </select>
+            <select className="ui-filter-input" value={filters.paymentMethod} onChange={e => updateFilter('paymentMethod', e.target.value)}>
+              <option value="">All Payment Methods</option>
+              <option value="cash">Cash</option>
+              <option value="card">Card</option>
+              <option value="online">Online</option>
+            </select>
+            <select className="ui-filter-input" value={filters.status} onChange={e => updateFilter('status', e.target.value)}>
+              <option value="">All Statuses</option>
+              <option value="completed">Completed</option>
+              <option value="returned">Returned</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </>
+        )}
 
-          {activeTab === 'sales' && (
-            <>
-              <select value={filters.groupBy} onChange={e => updateFilter('groupBy', e.target.value)} style={selectStyle}>
-                <option value="day">Daily</option>
-                <option value="week">Weekly</option>
-                <option value="month">Monthly</option>
-              </select>
-              <select value={filters.customer} onChange={e => updateFilter('customer', e.target.value)} style={selectStyle}>
-                <option value="">All Customers</option>
-                {customers.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
-              </select>
-              <select value={filters.paymentMethod} onChange={e => updateFilter('paymentMethod', e.target.value)} style={selectStyle}>
-                <option value="">All Payment Methods</option>
-                <option value="cash">Cash</option>
-                <option value="card">Card</option>
-                <option value="online">Online</option>
-              </select>
-              <select value={filters.status} onChange={e => updateFilter('status', e.target.value)} style={selectStyle}>
-                <option value="">All Statuses</option>
-                <option value="completed">Completed</option>
-                <option value="returned">Returned</option>
-                <option value="cancelled">Cancelled</option>
-              </select>
-            </>
-          )}
-
-          {(activeTab === 'products' || activeTab === 'profit') && (
-            <>
-              <select value={filters.product} onChange={e => updateFilter('product', e.target.value)} style={selectStyle}>
-                <option value="">All Products</option>
-                {products.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
-              </select>
-              <select value={filters.category} onChange={e => updateFilter('category', e.target.value)} style={selectStyle}>
-                <option value="">All Categories</option>
-                {categories.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
-              </select>
-            </>
-          )}
-
-          {activeTab === 'inventory' && (
-            <select value={filters.category} onChange={e => updateFilter('category', e.target.value)} style={selectStyle}>
+        {(activeTab === 'products' || activeTab === 'profit') && (
+          <>
+            <select className="ui-filter-input" value={filters.product} onChange={e => updateFilter('product', e.target.value)}>
+              <option value="">All Products</option>
+              {products.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
+            </select>
+            <select className="ui-filter-input" value={filters.category} onChange={e => updateFilter('category', e.target.value)}>
               <option value="">All Categories</option>
               {categories.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
             </select>
-          )}
+          </>
+        )}
 
-          {activeTab === 'customers' && (
-            <select value={filters.customer} onChange={e => updateFilter('customer', e.target.value)} style={selectStyle}>
-              <option value="">Top 10 Customers</option>
-              {customers.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
-            </select>
-          )}
+        {activeTab === 'inventory' && (
+          <select className="ui-filter-input" value={filters.category} onChange={e => updateFilter('category', e.target.value)}>
+            <option value="">All Categories</option>
+            {categories.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
+          </select>
+        )}
 
-          {activeTab === 'suppliers' && (
-            <select value={filters.supplier} onChange={e => updateFilter('supplier', e.target.value)} style={selectStyle}>
-              <option value="">All Suppliers</option>
-              {suppliers.map(s => <option key={s._id} value={s._id}>{s.name}</option>)}
-            </select>
-          )}
+        {activeTab === 'customers' && (
+          <select className="ui-filter-input" value={filters.customer} onChange={e => updateFilter('customer', e.target.value)}>
+            <option value="">Top 10 Customers</option>
+            {customers.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
+          </select>
+        )}
 
-          <button className="btn btn-primary" onClick={fetchReport} disabled={loading}>{loading ? 'Loading...' : 'Generate'}</button>
+        {activeTab === 'suppliers' && (
+          <select className="ui-filter-input" value={filters.supplier} onChange={e => updateFilter('supplier', e.target.value)}>
+            <option value="">All Suppliers</option>
+            {suppliers.map(s => <option key={s._id} value={s._id}>{s.name}</option>)}
+          </select>
+        )}
 
-          {reportData && (
-            <>
-              <button className="btn btn-secondary" onClick={() => downloadExport('excel')} disabled={exporting === `${activeTab}-excel`}>
-                {exporting === `${activeTab}-excel` ? 'Exporting...' : 'Export Excel'}
-              </button>
-              <button className="btn btn-secondary" onClick={() => downloadExport('pdf')} disabled={exporting === `${activeTab}-pdf`}>
-                {exporting === `${activeTab}-pdf` ? 'Exporting...' : 'Export PDF'}
-              </button>
-            </>
-          )}
-        </div>
+        <button className="ui-btn-outline" style={{ background: 'var(--primary)', color: 'white', borderColor: 'var(--primary)' }} onClick={fetchReport} disabled={loading}>
+          {loading ? 'Loading...' : 'Generate'}
+        </button>
+
+        {reportData && (
+          <>
+            <button className="ui-btn-outline" onClick={() => downloadExport('excel')} disabled={exporting === `${activeTab}-excel`}>
+              <FiDownload size={14} />
+              {exporting === `${activeTab}-excel` ? 'Exporting...' : 'Excel'}
+            </button>
+            <button className="ui-btn-outline" onClick={() => downloadExport('pdf')} disabled={exporting === `${activeTab}-pdf`}>
+              <FiDownload size={14} />
+              {exporting === `${activeTab}-pdf` ? 'Exporting...' : 'PDF'}
+            </button>
+          </>
+        )}
       </div>
 
-      {error && (
-        <div className="card" style={{ textAlign: 'center', color: 'var(--danger)' }}>{error}</div>
+      {loading && <div className="loading">Loading report...</div>}
+
+      {!loading && error && (
+        <div className="ui-table-card" style={{ textAlign: 'center', color: 'var(--danger)' }}>{error}</div>
       )}
 
-      {!error && reportData && (
+      {!loading && !error && reportData && (
         <ReportResults tab={activeTab} data={reportData} />
       )}
-    </div>
+    </>
   );
 }
 
 function SummaryCards({ summary }) {
   if (!summary) return null;
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 20 }}>
+    <div className="ui-summary-grid">
       {Object.entries(summary).map(([key, val]) => (
-        <div key={key} style={{ padding: 12, background: 'var(--bg)', borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: 'var(--text-light)' }}>{key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim()}</div>
-          <div style={{ fontSize: 18, fontWeight: 700 }}>{typeof val === 'number' ? (key.toLowerCase().includes('revenue') || key.toLowerCase().includes('spending') || key.toLowerCase().includes('profit') || key.toLowerCase().includes('cost') || key.toLowerCase().includes('value') || key.toLowerCase().includes('sale') ? money(val) : val.toLocaleString()) : String(val)}</div>
+        <div key={key} className="ui-summary-item">
+          <div className="ui-summary-label">{key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim()}</div>
+          <div className="ui-summary-value">
+            {typeof val === 'number'
+              ? (/Revenue|Cost|Profit|Spending|Value|avgSale/.test(key) ? money(val) : val.toLocaleString())
+              : String(val)}
+          </div>
         </div>
       ))}
     </div>
@@ -254,8 +258,8 @@ function ReportResults({ tab, data }) {
   if (tab === 'sales') {
     const { sales = [], summary } = data;
     return (
-      <div className="card">
-        <h3 style={{ marginBottom: 16 }}>Sales Report</h3>
+      <div className="ui-table-card">
+        <div className="ui-table-card-head"><div className="ui-chart-title">Sales Report</div></div>
         <SummaryCards summary={summary} />
         <table>
           <thead><tr><th>Period</th><th>Sales Count</th><th>Total Revenue</th><th>Avg Sale</th></tr></thead>
@@ -272,8 +276,8 @@ function ReportResults({ tab, data }) {
   if (tab === 'products') {
     const { productSales = [] } = data;
     return (
-      <div className="card">
-        <h3 style={{ marginBottom: 16 }}>Product Sales Report</h3>
+      <div className="ui-table-card">
+        <div className="ui-table-card-head"><div className="ui-chart-title">Product Sales Report</div></div>
         <table>
           <thead><tr><th>Product</th><th>SKU</th><th>Qty Sold</th><th>Revenue</th></tr></thead>
           <tbody>
@@ -289,8 +293,8 @@ function ReportResults({ tab, data }) {
   if (tab === 'inventory') {
     const { products = [], summary } = data;
     return (
-      <div className="card">
-        <h3 style={{ marginBottom: 16 }}>Inventory Report</h3>
+      <div className="ui-table-card">
+        <div className="ui-table-card-head"><div className="ui-chart-title">Inventory Report</div></div>
         <SummaryCards summary={summary} />
         <table>
           <thead><tr><th>Name</th><th>SKU</th><th>Category</th><th>Price</th><th>Cost</th><th>Stock</th><th>Min Stock</th><th>Status</th></tr></thead>
@@ -299,7 +303,7 @@ function ReportResults({ tab, data }) {
               <tr key={p._id}>
                 <td>{p.name}</td><td>{p.sku}</td><td>{p.category?.name || '-'}</td>
                 <td>{money(p.price)}</td><td>{money(p.cost)}</td><td>{p.stock}</td><td>{p.minimumStock}</td>
-                <td><span className={`badge ${p.stock <= p.minimumStock ? 'badge-danger' : 'badge-success'}`}>{p.stock <= p.minimumStock ? 'Low Stock' : 'In Stock'}</span></td>
+                <td>{p.stock <= p.minimumStock ? <span className="badge badge-danger">Low Stock</span> : <span className="badge badge-success">In Stock</span>}</td>
               </tr>
             ))}
           </tbody>
@@ -311,8 +315,8 @@ function ReportResults({ tab, data }) {
   if (tab === 'profit') {
     const { profitData = [], summary } = data;
     return (
-      <div className="card">
-        <h3 style={{ marginBottom: 16 }}>Profit Report</h3>
+      <div className="ui-table-card">
+        <div className="ui-table-card-head"><div className="ui-chart-title">Profit Report</div></div>
         <SummaryCards summary={summary} />
         <table>
           <thead><tr><th>Date</th><th>Revenue</th><th>Cost</th><th>Profit</th></tr></thead>
@@ -331,8 +335,8 @@ function ReportResults({ tab, data }) {
     if (purchaseHistory) {
       const cust = topCustomers[0];
       return (
-        <div className="card">
-          <h3 style={{ marginBottom: 16 }}>Customer Report — {cust?.name}</h3>
+        <div className="ui-table-card">
+          <div className="ui-table-card-head"><div className="ui-chart-title">Customer Report — {cust?.name}</div></div>
           <SummaryCards summary={summary} />
           <table>
             <thead><tr><th>Invoice #</th><th>Date</th><th>Total</th><th>Payment</th><th>Status</th></tr></thead>
@@ -346,8 +350,8 @@ function ReportResults({ tab, data }) {
       );
     }
     return (
-      <div className="card">
-        <h3 style={{ marginBottom: 16 }}>Customer Report (Top 10 by Spending)</h3>
+      <div className="ui-table-card">
+        <div className="ui-table-card-head"><div className="ui-chart-title">Customer Report (Top 10 by Spending)</div></div>
         <SummaryCards summary={summary} />
         <table>
           <thead><tr><th>Name</th><th>Phone</th><th>Email</th><th>Total Orders</th><th>Total Spending</th></tr></thead>
@@ -364,8 +368,8 @@ function ReportResults({ tab, data }) {
   if (tab === 'suppliers') {
     const { supplierPurchases = [] } = data;
     return (
-      <div className="card">
-        <h3 style={{ marginBottom: 16 }}>Supplier Purchases Report</h3>
+      <div className="ui-table-card">
+        <div className="ui-table-card-head"><div className="ui-chart-title">Supplier Purchases Report</div></div>
         <table>
           <thead><tr><th>Supplier</th><th>Company</th><th>Order Count</th><th>Total Purchases</th></tr></thead>
           <tbody>
