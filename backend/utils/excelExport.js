@@ -8,6 +8,36 @@ exports.exportToExcel = (data, sheetName, filePath) => {
   return filePath;
 };
 
+/**
+ * Stream a report (array of plain row objects) to the HTTP response as an .xlsx download.
+ * @param {Object} res - express response
+ * @param {Object} opts
+ * @param {Object[]} opts.rows - row objects with column-name keys (same keys across rows)
+ * @param {Object} [opts.totals] - optional final totals/summary row, same shape as rows
+ * @param {String} [opts.sheetName='Report']
+ * @param {String} opts.filename - filename without extension
+ */
+exports.exportReportToExcel = (res, { rows, totals, sheetName = 'Report', filename }) => {
+  const data = totals ? [...rows, totals] : rows;
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(data.length ? data : [{}]);
+
+  // Auto-size columns roughly based on content length
+  if (data.length) {
+    const headers = Object.keys(data[0]);
+    ws['!cols'] = headers.map((h) => ({
+      wch: Math.min(40, Math.max(h.length, ...data.map((r) => String(r[h] ?? '').length)) + 2),
+    }));
+  }
+
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename=${filename.replace(/\s+/g, '_')}.xlsx`);
+  res.send(buffer);
+};
+
 exports.formatSalesForExport = (sales) => {
   return sales.map(s => ({
     'Invoice #': s.invoiceNumber,

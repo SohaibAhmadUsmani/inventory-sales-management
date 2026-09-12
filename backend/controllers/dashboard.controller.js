@@ -23,10 +23,22 @@ exports.getDashboard = async (req, res, next) => {
     ]);
 
     const topProducts = await Sale.aggregate([
+      { $match: { status: 'completed' } },
       { $unwind: '$items' },
       { $group: { _id: '$items.name', totalQuantity: { $sum: '$items.quantity' }, totalRevenue: { $sum: '$items.total' } } },
       { $sort: { totalQuantity: -1 } },
       { $limit: 5 },
+    ]);
+
+    const revenueByCategory = await Sale.aggregate([
+      { $match: { status: 'completed' } },
+      { $unwind: '$items' },
+      { $lookup: { from: 'products', localField: 'items.product', foreignField: '_id', as: 'productInfo' } },
+      { $unwind: { path: '$productInfo', preserveNullAndEmptyArrays: true } },
+      { $lookup: { from: 'categories', localField: 'productInfo.category', foreignField: '_id', as: 'categoryInfo' } },
+      { $unwind: { path: '$categoryInfo', preserveNullAndEmptyArrays: true } },
+      { $group: { _id: { $ifNull: ['$categoryInfo.name', 'Uncategorized'] }, revenue: { $sum: '$items.total' } } },
+      { $sort: { revenue: -1 } },
     ]);
 
     res.json({
@@ -42,6 +54,7 @@ exports.getDashboard = async (req, res, next) => {
         monthlyRevenue: monthlyRevenue[0]?.total || 0,
         dailySales,
         topProducts,
+        revenueByCategory,
       },
     });
   } catch (err) { next(err); }
