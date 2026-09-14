@@ -12,6 +12,37 @@ const generateOrderNumber = () => {
   return `${prefix}-${timestamp}-${random}`;
 };
 
+const normalizePurchaseStatus = (status) => {
+  const normalized = status?.toLowerCase();
+  if (['ordered', 'received', 'cancelled'].includes(normalized)) return normalized;
+  return null;
+};
+
+const applyPurchaseStockIncrease = async (purchase, userId) => {
+  for (const item of purchase.items) {
+    const product = await Product.findById(item.product);
+    if (!product) {
+      throw new Error(`Product not found: ${item.product}`);
+    }
+
+    const previousStock = product.stock;
+    product.stock += item.quantity;
+    await product.save();
+
+    await Inventory.create({
+      product: item.product,
+      type: 'purchase',
+      quantity: item.quantity,
+      previousStock,
+      currentStock: product.stock,
+      reference: 'Purchase',
+      referenceId: purchase._id,
+      notes: `Received purchase order ${purchase.orderNumber}`,
+      performedBy: userId,
+    });
+  }
+};
+
 exports.getPurchases = async (req, res, next) => {
   try {
     const { supplier, status, paymentStatus, startDate, endDate, page = 1, limit = 20 } = req.query;
@@ -47,17 +78,61 @@ exports.getPurchase = async (req, res, next) => {
 
 exports.createPurchase = async (req, res, next) => {
   try {
-    const { supplierId, items, purchaseDate, paymentStatus, notes } = req.body;
-    if (!items || items.length === 0) return res.status(400).json({ success: false, message: 'No items in purchase' });
+    const { supplierId, items, purchaseDate, paymentStatus, notes, status } = req.body;
+
+    if (!supplierId) {
+      return res.status(400).json({ success: false, message: 'Supplier is required' });
+    }
+
+    if (!items || items.length === 0) {
+      return res.status(400).json({ success: false, message: 'No items in purchase' });
+    }
+
+    const normalizedStatus = normalizePurchaseStatus(status || 'ordered');
+    if (!normalizedStatus) {
+      return res.status(400).json({ success: false, message: 'Invalid purchase status' });
+    }
+
+    const supplier = await Supplier.findById(supplierId);
+    if (!supplier) {
+      return res.status(404).json({ success: false, message: 'Supplier not found' });
+    }
 
     let totalCost = 0;
     const purchaseItems = [];
+
     for (const item of items) {
-      const product = await Product.findById(item.productId);
-      if (!product) return res.status(404).json({ success: false, message: `Product not found: ${item.productId}` });
-      const total = item.cost * item.quantity;
+      const productId = item.productId || item.product;
+      if (!productId) {
+        return res.status(400).json({ success: false, message: 'Each purchase item must include a product' });
+      }
+
+      const product = await Product.findById(productId);
+      if (!product) {
+        return res.status(404).json({ success: false, message: `Product not found: ${productId}` });
+      }
+
+      const quantity = Number(item.quantity);
+      const cost = Number(item.cost ?? product.cost);
+
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        return res.status(400).json({ success: false, message: `Invalid quantity for product ${product.name}` });
+      }
+
+      if (!Number.isFinite(cost) || cost < 0) {
+        return res.status(400).json({ success: false, message: `Invalid cost for product ${product.name}` });
+      }
+
+      const total = cost * quantity;
       totalCost += total;
-      purchaseItems.push({ product: product._id, name: product.name, quantity: item.quantity, cost: item.cost, total });
+
+      purchaseItems.push({
+        product: product._id,
+        name: product.name,
+        quantity,
+        cost,
+        total,
+      });
     }
 
     const purchase = await Purchase.create({
@@ -67,37 +142,82 @@ exports.createPurchase = async (req, res, next) => {
       totalCost,
       purchaseDate: purchaseDate || new Date(),
       paymentStatus: paymentStatus || 'pending',
-      notes,
+      status: normalizedStatus,
+      notes: notes || '',
       createdBy: req.user.id,
     });
 
-    // Update stock for each product
-    for (const item of purchaseItems) {
-      const product = await Product.findById(item.product);
-      const previousStock = product.stock;
-      product.stock += item.quantity;
-      await product.save();
-      await Inventory.create({
-        product: item.product, type: 'purchase', quantity: item.quantity,
-        previousStock, currentStock: product.stock, performedBy: req.user.id,
-        reference: 'Purchase', referenceId: purchase._id,
-      });
-    }
+    await Notification.create({
+      type: 'purchase_received',
+      title: 'Purchase Order Created',
+      message: `Purchase order ${purchase.orderNumber} created for $${totalCost.toFixed(2)}`,
+    });
 
-    // Update supplier total purchases
-    await Supplier.findByIdAndUpdate(supplierId, { $inc: { totalPurchases: totalCost } });
+    await ActivityLog.create({
+      user: req.user.id,
+      action: 'Created',
+      entity: 'Purchase',
+      entityId: purchase._id,
+      details: `Created purchase order ${purchase.orderNumber} - $${totalCost.toFixed(2)}`,
+    });
 
-    await Notification.create({ type: 'purchase_received', title: 'Purchase Order Created', message: `Purchase order ${purchase.orderNumber} created for $${totalCost.toFixed(2)}` });
-    await ActivityLog.create({ user: req.user.id, action: 'Created', entity: 'Purchase', entityId: purchase._id, details: `Created purchase order ${purchase.orderNumber} - $${totalCost.toFixed(2)}` });
+    const populatedPurchase = await Purchase.findById(purchase._id)
+      .populate('supplier', 'name company')
+      .populate('createdBy', 'name');
 
-    res.status(201).json({ success: true, purchase });
+    res.status(201).json({ success: true, purchase: populatedPurchase });
   } catch (err) { next(err); }
 };
 
 exports.updatePurchaseStatus = async (req, res, next) => {
   try {
-    const purchase = await Purchase.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true });
-    if (!purchase) return res.status(404).json({ success: false, message: 'Purchase not found' });
-    res.json({ success: true, purchase });
+    const purchase = await Purchase.findById(req.params.id);
+    if (!purchase) {
+      return res.status(404).json({ success: false, message: 'Purchase not found' });
+    }
+
+    const nextStatus = normalizePurchaseStatus(req.body.status || purchase.status);
+    if (!nextStatus) {
+      return res.status(400).json({ success: false, message: 'Invalid purchase status' });
+    }
+
+    const statusChangedToReceived = nextStatus === 'received' && purchase.status !== 'received';
+
+    if (statusChangedToReceived) {
+      await applyPurchaseStockIncrease(purchase, req.user.id);
+      await Supplier.findByIdAndUpdate(purchase.supplier, { $inc: { totalPurchases: purchase.totalCost } });
+    }
+
+    purchase.status = nextStatus;
+
+    if (req.body.paymentStatus) {
+      purchase.paymentStatus = req.body.paymentStatus;
+    }
+
+    if (req.body.notes !== undefined) {
+      purchase.notes = req.body.notes;
+    }
+
+    await purchase.save();
+
+    await Notification.create({
+      type: 'purchase_received',
+      title: 'Purchase Received',
+      message: `Purchase order ${purchase.orderNumber} marked as received`,
+    });
+
+    await ActivityLog.create({
+      user: req.user.id,
+      action: 'Updated',
+      entity: 'Purchase',
+      entityId: purchase._id,
+      details: `Updated purchase order ${purchase.orderNumber} status to ${purchase.status}`,
+    });
+
+    const populatedPurchase = await Purchase.findById(purchase._id)
+      .populate('supplier', 'name company')
+      .populate('createdBy', 'name');
+
+    res.json({ success: true, purchase: populatedPurchase });
   } catch (err) { next(err); }
 };

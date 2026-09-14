@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { to: '/sales', label: 'Sales History', icon: FiClock },
   { to: '/customers', label: 'Customers', icon: FiUsers },
   { to: '/suppliers', label: 'Suppliers', icon: FiTruck, adminOnly: true },
+  { to: '/purchases', label: 'Purchases', icon: FiShoppingCart, adminOnly: true },
   { to: '/reports', label: 'Reports', icon: FiFileText, adminOnly: true },
 ];
 

@@ -32,6 +32,20 @@ export default function Suppliers() {
     }
   };
 
+  const handleDeleteSupplier = async (supplierId) => {
+    if (!window.confirm('Are you sure you want to delete this supplier?')) {
+      return;
+    }
+
+    try {
+      await api.delete(`/suppliers/${supplierId}`);
+      toast.success('Supplier deleted');
+      fetchSuppliers();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to delete supplier');
+    }
+  };
+
   return (
     <div>
       <div className="page-header">
@@ -43,10 +57,10 @@ export default function Suppliers() {
       </div>
       <div className="card">
         <table>
-          <thead><tr><th>Name</th><th>Company</th><th>Phone</th><th>Email</th><th>Total Purchases</th></tr></thead>
+          <thead><tr><th>Name</th><th>Company</th><th>Phone</th><th>Email</th><th>Total Purchases</th><th>Actions</th></tr></thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan="5" className="loading">Loading...</td></tr>
+              <tr><td colSpan="6" className="loading">Loading...</td></tr>
             ) : suppliers.map(s => (
               <tr key={s._id}>
                 <td>{s.name}</td>
@@ -54,6 +68,15 @@ export default function Suppliers() {
                 <td>{s.phone}</td>
                 <td>{s.email}</td>
                 <td>${s.totalPurchases?.toFixed(2)}</td>
+                <td>
+                  <button
+                    className="btn btn-danger"
+                    style={{ padding: '4px 10px', fontSize: 12 }}
+                    onClick={() => handleDeleteSupplier(s._id)}
+                  >
+                    Delete
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
