@@ -1,101 +1,1156 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { toast } from 'react-toastify';
+import {
+  FiBox,
+  FiAlertCircle,
+  FiArrowDownLeft,
+  FiArrowUpRight,
+  FiRefreshCw,
+  FiSliders,
+  FiDownload,
+  FiSearch,
+  FiPlus,
+  FiMinus,
+  FiAlertTriangle,
+  FiX,
+  FiCheckCircle,
+  FiClock,
+  FiChevronLeft,
+  FiChevronRight,
+  FiPackage,
+  FiLayers,
+} from 'react-icons/fi';
+import './Inventory.css';
+
+const resolveImageUrl = (img) => {
+  if (!img) return '';
+  if (img.startsWith('http')) return img;
+  const baseUrl = import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:5000';
+  return `${baseUrl}${img}`;
+};
 
 export default function Inventory() {
+  // Navigation tabs: 'history' | 'alerts' | 'current'
+  const [activeTab, setActiveTab] = useState('history');
+
+  // Stats
+  const [stats, setStats] = useState({
+    totalStockedItems: 0,
+    criticalLowStock: 0,
+    movementsToday: 0,
+    totalPortfolioValue: 0,
+    accuracyRate: 98.4,
+  });
+  const [statsLoading, setStatsLoading] = useState(true);
+
+  // Movement Ledger State
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [type, setType] = useState('');
-  const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ productId: '', quantity: '', notes: '' });
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalEntries, setTotalEntries] = useState(0);
 
-  const fetchInventory = () => {
+  // Filters
+  const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [dateFilter, setDateFilter] = useState('all');
+
+  // Critical Alerts & Catalog
+  const [criticalAlerts, setCriticalAlerts] = useState([]);
+  const [currentStockList, setCurrentStockList] = useState([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+
+  // Modals & Action Forms
+  // modalMode: null | 'adjust' | 'in' | 'out' | 'damaged'
+  const [modalMode, setModalMode] = useState(null);
+  const [productsList, setProductsList] = useState([]);
+  const [form, setForm] = useState({
+    productId: '',
+    quantity: '',
+    newQuantity: '',
+    reason: '',
+    reference: '',
+    notes: '',
+  });
+  const [submitting, setSubmitting] = useState(false);
+
+  // Fetch KPI statistics
+  const fetchStats = useCallback(() => {
+    setStatsLoading(true);
+    api.get('/inventory/stats')
+      .then((res) => {
+        if (res.data?.stats) {
+          setStats(res.data.stats);
+        }
+      })
+      .catch((err) => console.error('Failed to load inventory stats', err))
+      .finally(() => setStatsLoading(false));
+  }, []);
+
+  // Calculate start date string based on preset
+  const getDateRangeParams = useCallback(() => {
+    if (dateFilter === 'today') {
+      const today = new Date().toISOString().split('T')[0];
+      return { startDate: today, endDate: today };
+    }
+    if (dateFilter === '7days') {
+      const d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      return { startDate: d };
+    }
+    if (dateFilter === '30days') {
+      const d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      return { startDate: d };
+    }
+    return {};
+  }, [dateFilter]);
+
+  // Fetch Movement History Ledger
+  const fetchInventory = useCallback(() => {
     setLoading(true);
-    api.get('/inventory', { params: { type } })
-      .then(res => setRecords(res.data.records))
-      .catch(console.error)
+    const dateParams = getDateRangeParams();
+    api.get('/inventory', {
+      params: {
+        page,
+        limit: 10,
+        search: search.trim() || undefined,
+        type: typeFilter !== 'all' ? typeFilter : undefined,
+        ...dateParams,
+      },
+    })
+      .then((res) => {
+        setRecords(res.data?.records || []);
+        setTotalPages(res.data?.totalPages || 1);
+        setTotalEntries(res.data?.total || 0);
+      })
+      .catch((err) => {
+        toast.error(err.response?.data?.message || 'Failed to load movement logs');
+      })
       .finally(() => setLoading(false));
+  }, [page, search, typeFilter, getDateRangeParams]);
+
+  // Fetch Critical Low Stock Items
+  const fetchLowStockAlerts = useCallback(() => {
+    api.get('/inventory/low-stock')
+      .then((res) => setCriticalAlerts(res.data?.alerts || []))
+      .catch(console.error);
+  }, []);
+
+  // Fetch Current Stock Catalog
+  const fetchCurrentStock = useCallback(() => {
+    setCatalogLoading(true);
+    api.get('/inventory/current-stock', {
+      params: { search: search.trim() || undefined, limit: 50 },
+    })
+      .then((res) => setCurrentStockList(res.data?.products || []))
+      .catch(console.error)
+      .finally(() => setCatalogLoading(false));
+  }, [search]);
+
+  // Fetch products for modal selectors
+  const fetchProductsForModal = useCallback(() => {
+    api.get('/products', { params: { limit: 100 } })
+      .then((res) => setProductsList(res.data?.products || []))
+      .catch(console.error);
+  }, []);
+
+  // Initial Load & Tab synchronization
+  useEffect(() => {
+    fetchStats();
+    fetchLowStockAlerts();
+    fetchProductsForModal();
+  }, [fetchStats, fetchLowStockAlerts, fetchProductsForModal]);
+
+  useEffect(() => {
+    if (activeTab === 'history') {
+      fetchInventory();
+    } else if (activeTab === 'current') {
+      fetchCurrentStock();
+    }
+  }, [activeTab, fetchInventory, fetchCurrentStock]);
+
+  // Debounced search reset page
+  useEffect(() => {
+    setPage(1);
+  }, [search, typeFilter, dateFilter]);
+
+  // Selected product helper for real-time calculations in modals
+  const selectedProduct = useMemo(() => {
+    return productsList.find((p) => p._id === form.productId) || null;
+  }, [productsList, form.productId]);
+
+  // Handle Export Log (CSV)
+  const handleExportCsv = async () => {
+    try {
+      const dateParams = getDateRangeParams();
+      const params = new URLSearchParams({
+        type: typeFilter,
+        search: search.trim(),
+        ...dateParams,
+      }).toString();
+
+      const response = await api.get(`/inventory/export-csv?${params}`, {
+        responseType: 'blob',
+      });
+
+      const blob = new Blob([response.data], { type: 'text/csv;charset=utf-8;' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `inventory-ledger-${new Date().toISOString().slice(0, 10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success('Inventory ledger exported successfully');
+    } catch (err) {
+      toast.error('Failed to export inventory logs');
+    }
   };
 
-  useEffect(() => { fetchInventory(); }, [type]);
+  // Open Modal with clean form
+  const openModal = (mode, defaultProductId = '') => {
+    setModalMode(mode);
+    setForm({
+      productId: defaultProductId,
+      quantity: '',
+      newQuantity: '',
+      reason: '',
+      reference: '',
+      notes: '',
+    });
+  };
 
-  const handleStockIn = async (e) => {
+  const closeModal = () => {
+    setModalMode(null);
+    setForm({ productId: '', quantity: '', newQuantity: '', reason: '', reference: '', notes: '' });
+  };
+
+  // Submit Modal Action
+  const handleFormSubmit = async (e) => {
     e.preventDefault();
+    if (!form.productId) {
+      return toast.warning('Please select a product');
+    }
+
+    setSubmitting(true);
     try {
-      await api.post('/inventory/stock-in', form);
-      toast.success('Stock added');
-      setShowModal(false);
-      setForm({ productId: '', quantity: '', notes: '' });
-      fetchInventory();
+      if (modalMode === 'in') {
+        const payload = {
+          productId: form.productId,
+          quantity: Number(form.quantity),
+          reference: form.reference,
+          notes: form.notes,
+        };
+        const res = await api.post('/inventory/stock-in', payload);
+        toast.success(res.data?.message || 'Stock In recorded successfully');
+      } else if (modalMode === 'out') {
+        const payload = {
+          productId: form.productId,
+          quantity: Number(form.quantity),
+          reference: form.reference,
+          notes: form.notes,
+        };
+        const res = await api.post('/inventory/stock-out', payload);
+        toast.success(res.data?.message || 'Stock Out recorded successfully');
+      } else if (modalMode === 'damaged') {
+        const payload = {
+          productId: form.productId,
+          quantity: Number(form.quantity),
+          reason: form.reason,
+          notes: form.notes,
+        };
+        const res = await api.post('/inventory/damaged', payload);
+        toast.success(res.data?.message || 'Damaged stock recorded successfully');
+      } else if (modalMode === 'adjust') {
+        const payload = {
+          productId: form.productId,
+          newQuantity: Number(form.newQuantity),
+          reason: form.reason,
+          notes: form.notes,
+        };
+        const res = await api.post('/inventory/adjust', payload);
+        toast.success(res.data?.message || 'Stock reconciled successfully');
+      }
+
+      closeModal();
+      fetchStats();
+      fetchLowStockAlerts();
+      fetchProductsForModal();
+      if (activeTab === 'history') fetchInventory();
+      if (activeTab === 'current') fetchCurrentStock();
     } catch (err) {
-      toast.error(err.response?.data?.message || 'Failed');
+      toast.error(err.response?.data?.message || 'Operation failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Helper for rendering initials
+  const getInitials = (name) => {
+    if (!name) return 'SYS';
+    const parts = name.trim().split(' ');
+    if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+    return name.slice(0, 2).toUpperCase();
+  };
+
+  // Helper for vector pill styling
+  const renderVectorBadge = (type) => {
+    switch (type) {
+      case 'stock_in':
+      case 'purchase':
+        return (
+          <span className="inv-vector-badge inv-vector-inbound">
+            <FiArrowDownLeft size={13} />
+            Inbound
+          </span>
+        );
+      case 'stock_out':
+      case 'sale':
+        return (
+          <span className="inv-vector-badge inv-vector-outbound">
+            <FiArrowUpRight size={13} />
+            Outbound
+          </span>
+        );
+      case 'adjustment':
+        return (
+          <span className="inv-vector-badge inv-vector-adjust">
+            <FiRefreshCw size={12} />
+            Adjustment
+          </span>
+        );
+      case 'damaged':
+        return (
+          <span className="inv-vector-badge inv-vector-damaged">
+            <FiAlertTriangle size={12} />
+            Damaged
+          </span>
+        );
+      default:
+        return <span className="inv-vector-badge">{type}</span>;
     }
   };
 
   return (
-    <div>
-      <div className="page-header">
-        <h1>Inventory</h1>
-        <button className="btn btn-primary" onClick={() => setShowModal(true)}>Stock In</button>
+    <div className="inv-container">
+      {/* ----------------- Top Control Bar & Header ----------------- */}
+      <div className="inv-header">
+        <div className="inv-header-main">
+          <div className="inv-system-badge">
+            <span className="inv-pulse-dot" />
+            System Operational
+          </div>
+          <h1 className="inv-title">Inventory Control</h1>
+          <p className="inv-subtitle">
+            Monitor stock levels, track forensic movements, and reconcile audit discrepancies across catalog lines.
+          </p>
+        </div>
+
+        <div className="inv-header-actions">
+          <button className="inv-btn inv-btn-secondary" onClick={handleExportCsv}>
+            <FiDownload size={15} />
+            Export Log
+          </button>
+          <button className="inv-btn inv-btn-primary" onClick={() => openModal('adjust')}>
+            <FiSliders size={15} />
+            Manual Adjustment
+          </button>
+          <button className="inv-btn inv-btn-inbound-outline inv-btn-sm" onClick={() => openModal('in')}>
+            <FiPlus size={14} />
+            Stock In
+          </button>
+          <button className="inv-btn inv-btn-outbound-outline inv-btn-sm" onClick={() => openModal('out')}>
+            <FiMinus size={14} />
+            Stock Out
+          </button>
+          <button className="inv-btn inv-btn-danger-outline inv-btn-sm" onClick={() => openModal('damaged')}>
+            <FiAlertTriangle size={14} />
+            Damaged
+          </button>
+        </div>
       </div>
 
-      <div className="search-bar">
-        <select value={type} onChange={e => setType(e.target.value)} style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border)' }}>
-          <option value="">All Types</option>
-          <option value="stock_in">Stock In</option>
-          <option value="stock_out">Stock Out</option>
-          <option value="damaged">Damaged</option>
-          <option value="adjustment">Adjustment</option>
-          <option value="sale">Sale</option>
-          <option value="purchase">Purchase</option>
-        </select>
+      {/* ----------------- 4 KPI Stat Cards ----------------- */}
+      <div className="inv-kpi-grid">
+        {/* Card 1: Total Stocked Items */}
+        <div className="inv-kpi-card">
+          <div className="inv-kpi-top">
+            <span className="inv-kpi-label">Total Stocked Items</span>
+            <div className="inv-kpi-icon-wrap" style={{ background: '#ecfdf5', color: '#059669' }}>
+              <FiPackage size={18} />
+            </div>
+          </div>
+          <div className="inv-kpi-value">
+            {statsLoading ? '...' : Number(stats.totalStockedItems).toLocaleString()}
+          </div>
+          <div className="inv-kpi-bottom">
+            <span>• Active physical units in warehouse</span>
+          </div>
+        </div>
+
+        {/* Card 2: Critical Low Stock */}
+        <div className="inv-kpi-card">
+          <div className="inv-kpi-top">
+            <span className="inv-kpi-label">Critical Low Stock</span>
+            <div className="inv-kpi-icon-wrap" style={{ background: '#fee2e2', color: '#e11d48' }}>
+              <FiAlertCircle size={18} />
+            </div>
+          </div>
+          <div className="inv-kpi-value" style={{ color: stats.criticalLowStock > 0 ? '#e11d48' : '#059669' }}>
+            {statsLoading ? '...' : stats.criticalLowStock}
+          </div>
+          <div className="inv-kpi-bottom">
+            <span className={`inv-kpi-pill ${stats.criticalLowStock > 0 ? 'inv-kpi-pill-critical' : 'inv-kpi-pill-normal'}`}>
+              {stats.criticalLowStock > 0 ? 'Require attention' : 'Optimal levels'}
+            </span>
+          </div>
+        </div>
+
+        {/* Card 3: Movements Today */}
+        <div className="inv-kpi-card">
+          <div className="inv-kpi-top">
+            <span className="inv-kpi-label">Movements Today</span>
+            <div className="inv-kpi-icon-wrap" style={{ background: '#eef2ff', color: '#4f46e5' }}>
+              <FiArrowDownLeft size={18} />
+            </div>
+          </div>
+          <div className="inv-kpi-value">
+            {statsLoading ? '...' : stats.movementsToday}
+          </div>
+          <div className="inv-kpi-bottom">
+            <span>• {stats.unitsMovedToday || 0} units moved today</span>
+          </div>
+        </div>
+
+        {/* Card 4: Total Portfolio Value */}
+        <div className="inv-kpi-card">
+          <div className="inv-kpi-top">
+            <span className="inv-kpi-label">Total Portfolio Value</span>
+            <div className="inv-kpi-icon-wrap" style={{ background: '#f8fafc', color: '#0f172a', border: '1px solid #e2e8f0' }}>
+              <FiBox size={18} />
+            </div>
+          </div>
+          <div className="inv-kpi-value">
+            {statsLoading ? '...' : `$${Number(stats.totalPortfolioValue).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`}
+          </div>
+          <div className="inv-kpi-bottom">
+            <span>• Cost basis inventory valuation</span>
+          </div>
+        </div>
       </div>
 
-      <div className="card">
-        <table>
-          <thead>
-            <tr><th>Date</th><th>Product</th><th>Type</th><th>Qty</th><th>Previous</th><th>Current</th><th>By</th></tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr><td colSpan="7" className="loading">Loading...</td></tr>
-            ) : records.length === 0 ? (
-              <tr><td colSpan="7" style={{ textAlign: 'center', padding: 24 }}>No records</td></tr>
-            ) : records.map(r => (
-              <tr key={r._id}>
-                <td>{new Date(r.createdAt).toLocaleDateString()}</td>
-                <td>{r.product?.name || '-'}</td>
-                <td><span className={`badge badge-${r.type === 'damaged' ? 'danger' : r.type === 'sale' ? 'warning' : 'info'}`}>{r.type}</span></td>
-                <td>{r.quantity}</td>
-                <td>{r.previousStock}</td>
-                <td>{r.currentStock}</td>
-                <td>{r.performedBy?.name || '-'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {/* ----------------- Sub-Nav Tabs ----------------- */}
+      <div className="inv-tabs-bar">
+        <div className="inv-tabs-list">
+          <button
+            className={`inv-tab-btn ${activeTab === 'history' ? 'active' : ''}`}
+            onClick={() => setActiveTab('history')}
+          >
+            <FiClock size={15} />
+            Movement History
+            <span className="inv-tab-count">{totalEntries}</span>
+          </button>
+          <button
+            className={`inv-tab-btn ${activeTab === 'alerts' ? 'active' : ''}`}
+            onClick={() => setActiveTab('alerts')}
+          >
+            <FiAlertCircle size={15} />
+            Low Stock Alerts
+            <span className="inv-tab-count" style={{ background: criticalAlerts.length > 0 ? '#fee2e2' : undefined, color: criticalAlerts.length > 0 ? '#b91c1c' : undefined }}>
+              {criticalAlerts.length}
+            </span>
+          </button>
+          <button
+            className={`inv-tab-btn ${activeTab === 'current' ? 'active' : ''}`}
+            onClick={() => setActiveTab('current')}
+          >
+            <FiLayers size={15} />
+            Current Stock Levels
+            <span className="inv-tab-count">{stats.totalProductCount || 0}</span>
+          </button>
+        </div>
+
+        {activeTab === 'history' && (
+          <button className="inv-btn inv-btn-secondary inv-btn-sm" onClick={fetchInventory}>
+            <FiRefreshCw size={13} />
+            Refresh
+          </button>
+        )}
       </div>
 
-      {showModal && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
-          <div className="card" style={{ width: 400 }}>
-            <h2 style={{ marginBottom: 16 }}>Stock In</h2>
-            <form onSubmit={handleStockIn}>
-              <div className="form-group">
-                <label>Product ID</label>
-                <input value={form.productId} onChange={e => setForm({ ...form, productId: e.target.value })} required />
+      {/* ----------------- Toolbar: Search & Vector Filters ----------------- */}
+      <div className="inv-toolbar">
+        <div className="inv-search-wrap">
+          <FiSearch size={16} color="var(--inv-text-muted)" />
+          <input
+            type="text"
+            placeholder="Search SKU, product name, or reference ID..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--inv-text-muted)' }}
+            >
+              <FiX size={14} />
+            </button>
+          )}
+        </div>
+
+        {activeTab === 'history' && (
+          <div className="inv-filters-group">
+            <select
+              className="inv-select"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+            >
+              <option value="all">All Vectors</option>
+              <option value="inbound">Inbound (Stock In / PO)</option>
+              <option value="outbound">Outbound (Stock Out / Sale)</option>
+              <option value="adjustment">Adjustments</option>
+              <option value="damaged">Damaged Goods</option>
+            </select>
+
+            <select
+              className="inv-select"
+              value={dateFilter}
+              onChange={(e) => setDateFilter(e.target.value)}
+            >
+              <option value="all">All Time</option>
+              <option value="today">Today</option>
+              <option value="7days">Last 7 Days</option>
+              <option value="30days">Last 30 Days</option>
+            </select>
+          </div>
+        )}
+      </div>
+
+      {/* ----------------- Tab 1: Movement History Table ----------------- */}
+      {activeTab === 'history' && (
+        <div className="inv-table-card">
+          <div className="inv-table-scroll">
+            <table className="inv-table">
+              <thead>
+                <tr>
+                  <th>Reference</th>
+                  <th>Product / SKU</th>
+                  <th>Type</th>
+                  <th>Differential</th>
+                  <th>Reason / Note</th>
+                  <th>Date & Time</th>
+                  <th>User</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading ? (
+                  Array.from({ length: 5 }).map((_, idx) => (
+                    <tr key={idx}>
+                      <td colSpan={8} style={{ padding: '16px' }}>
+                        <div className="inv-skeleton" style={{ height: '28px', width: '100%' }} />
+                      </td>
+                    </tr>
+                  ))
+                ) : records.length === 0 ? (
+                  <tr>
+                    <td colSpan={8}>
+                      <div className="inv-empty-state">
+                        <FiPackage size={36} color="var(--inv-border-hover)" />
+                        <div style={{ fontWeight: 600, color: 'var(--inv-text-title)' }}>No transaction records found</div>
+                        <div style={{ fontSize: '13px' }}>Try adjusting your filters or search terms.</div>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  records.map((r) => {
+                    const diff = r.differential;
+                    const isPositive = diff > 0;
+                    const isNegative = diff < 0;
+
+                    return (
+                      <tr key={r._id}>
+                        {/* Reference ID & Date */}
+                        <td>
+                          <div className="inv-ref-col">
+                            <span className="inv-ref-code">{r.trxCode}</span>
+                            <span className="inv-ref-time">
+                              {new Date(r.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* Product Thumbnail & SKU */}
+                        <td>
+                          <div className="inv-prod-cell">
+                            <div className="inv-prod-thumb">
+                              {r.product?.image ? (
+                                <img src={resolveImageUrl(r.product.image)} alt={r.product.name} />
+                              ) : (
+                                r.product?.name?.[0]?.toUpperCase() || 'P'
+                              )}
+                            </div>
+                            <div className="inv-prod-meta">
+                              <span className="inv-prod-name">{r.product?.name || 'Unknown Product'}</span>
+                              <span className="inv-prod-sku">{r.product?.sku || 'SKU-N/A'}</span>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Vector Type */}
+                        <td>{renderVectorBadge(r.type)}</td>
+
+                        {/* Differential (+ / -) */}
+                        <td>
+                          <span
+                            className={`inv-diff ${
+                              isPositive ? 'inv-diff-pos' : isNegative ? 'inv-diff-neg' : 'inv-diff-neutral'
+                            }`}
+                          >
+                            {isPositive ? `+${diff}` : diff}
+                          </span>
+                        </td>
+
+                        {/* Reason / Note */}
+                        <td>
+                          <div style={{ maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {r.notes || r.reference || 'Manual movement'}
+                          </div>
+                        </td>
+
+                        {/* Date */}
+                        <td style={{ fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                          {new Date(r.createdAt).toLocaleDateString()}
+                        </td>
+
+                        {/* User Initials & Name */}
+                        <td>
+                          <div className="inv-user-cell">
+                            <div className="inv-user-bubble">{getInitials(r.performedBy?.name)}</div>
+                            <span className="inv-user-name">{r.performedBy?.name || 'Staff User'}</span>
+                          </div>
+                        </td>
+
+                        {/* Status */}
+                        <td>
+                          <span className="inv-status-pill inv-status-completed">Completed</span>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination Footer */}
+          {!loading && records.length > 0 && (
+            <div className="inv-table-footer">
+              <div>
+                Showing {(page - 1) * 10 + 1} to {Math.min(page * 10, totalEntries)} of {totalEntries} entries
               </div>
-              <div className="form-group">
-                <label>Quantity</label>
-                <input type="number" value={form.quantity} onChange={e => setForm({ ...form, quantity: e.target.value })} required />
+              <div className="inv-pagination">
+                <button
+                  className="inv-page-btn"
+                  disabled={page <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                >
+                  <FiChevronLeft size={14} />
+                  Prev
+                </button>
+                <button className="inv-page-btn active">{page}</button>
+                <button
+                  className="inv-page-btn"
+                  disabled={page >= totalPages}
+                  onClick={() => setPage((p) => p + 1)}
+                >
+                  Next
+                  <FiChevronRight size={14} />
+                </button>
               </div>
-              <div className="form-group">
-                <label>Notes</label>
-                <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ----------------- Tab 2: Low Stock Alerts View ----------------- */}
+      {activeTab === 'alerts' && (
+        <div className="inv-table-card">
+          <div className="inv-table-scroll">
+            <table className="inv-table">
+              <thead>
+                <tr>
+                  <th>Product Details</th>
+                  <th>Category</th>
+                  <th>Current Stock</th>
+                  <th>Min Threshold</th>
+                  <th>Deficit to Reorder</th>
+                  <th>Supplier</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {criticalAlerts.length === 0 ? (
+                  <tr>
+                    <td colSpan={7}>
+                      <div className="inv-empty-state">
+                        <FiCheckCircle size={36} color="#059669" />
+                        <div style={{ fontWeight: 700, color: 'var(--inv-text-title)' }}>All stock levels are optimal</div>
+                        <div style={{ fontSize: '13px' }}>No products are currently at or below minimum threshold.</div>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  criticalAlerts.map((item) => (
+                    <tr key={item._id}>
+                      <td>
+                        <div className="inv-prod-cell">
+                          <div className="inv-prod-thumb">
+                            {item.image ? (
+                              <img src={resolveImageUrl(item.image)} alt={item.name} />
+                            ) : (
+                              item.name?.[0]?.toUpperCase() || 'P'
+                            )}
+                          </div>
+                          <div className="inv-prod-meta">
+                            <span className="inv-prod-name">{item.name}</span>
+                            <span className="inv-prod-sku">{item.sku}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td>{item.category}</td>
+                      <td>
+                        <span style={{ fontWeight: 700, color: item.stock === 0 ? '#e11d48' : '#d97706', fontVariantNumeric: 'tabular-nums' }}>
+                          {item.stock} units
+                        </span>
+                      </td>
+                      <td style={{ fontVariantNumeric: 'tabular-nums' }}>{item.minimumStock} units</td>
+                      <td>
+                        <span className="inv-kpi-pill inv-kpi-pill-critical">
+                          -{item.deficit} units required
+                        </span>
+                      </td>
+                      <td>{item.supplier || 'Not linked'}</td>
+                      <td>
+                        <button
+                          className="inv-btn inv-btn-inbound-outline inv-btn-sm"
+                          onClick={() => openModal('in', item._id)}
+                        >
+                          <FiPlus size={13} />
+                          Quick Restock
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------- Tab 3: Current Stock Catalog ----------------- */}
+      {activeTab === 'current' && (
+        <div className="inv-table-card">
+          <div className="inv-table-scroll">
+            <table className="inv-table">
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Category</th>
+                  <th>Stock On Hand</th>
+                  <th>Min Stock</th>
+                  <th>Unit Cost</th>
+                  <th>Total Valuation</th>
+                  <th>Status</th>
+                  <th>Quick Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {catalogLoading ? (
+                  Array.from({ length: 5 }).map((_, idx) => (
+                    <tr key={idx}>
+                      <td colSpan={8} style={{ padding: '16px' }}>
+                        <div className="inv-skeleton" style={{ height: '28px', width: '100%' }} />
+                      </td>
+                    </tr>
+                  ))
+                ) : currentStockList.length === 0 ? (
+                  <tr>
+                    <td colSpan={8}>
+                      <div className="inv-empty-state">No products found</div>
+                    </td>
+                  </tr>
+                ) : (
+                  currentStockList.map((p) => (
+                    <tr key={p._id}>
+                      <td>
+                        <div className="inv-prod-cell">
+                          <div className="inv-prod-thumb">
+                            {p.image ? (
+                              <img src={resolveImageUrl(p.image)} alt={p.name} />
+                            ) : (
+                              p.name?.[0]?.toUpperCase() || 'P'
+                            )}
+                          </div>
+                          <div className="inv-prod-meta">
+                            <span className="inv-prod-name">{p.name}</span>
+                            <span className="inv-prod-sku">{p.sku}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td>{p.category?.name || 'General'}</td>
+                      <td style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{p.stock}</td>
+                      <td style={{ fontVariantNumeric: 'tabular-nums' }}>{p.minimumStock}</td>
+                      <td style={{ fontVariantNumeric: 'tabular-nums' }}>${p.cost}</td>
+                      <td style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>${p.stockValue}</td>
+                      <td>
+                        <span
+                          className={`inv-kpi-pill ${
+                            p.stockStatus === 'critical' || p.stockStatus === 'low_stock'
+                              ? 'inv-kpi-pill-critical'
+                              : 'inv-kpi-pill-normal'
+                          }`}
+                        >
+                          {p.stock === 0 ? 'Out of Stock' : p.stock <= p.minimumStock ? 'Low Stock' : 'In Stock'}
+                        </span>
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            className="inv-btn inv-btn-secondary inv-btn-sm"
+                            title="Adjust Stock"
+                            onClick={() => openModal('adjust', p._id)}
+                          >
+                            <FiSliders size={12} />
+                          </button>
+                          <button
+                            className="inv-btn inv-btn-inbound-outline inv-btn-sm"
+                            title="Add Stock In"
+                            onClick={() => openModal('in', p._id)}
+                          >
+                            <FiPlus size={12} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------- Bottom Bento Grid (Visily 1:1 Layout) ----------------- */}
+      {activeTab === 'history' && (
+        <div className="inv-bento-grid">
+          {/* Left Panel: Critical Stock Watchlist & Operational Events */}
+          <div className="inv-bento-card">
+            <div className="inv-bento-head">
+              <div>
+                <div className="inv-bento-title">Critical Stock Watchlist</div>
+                <div className="inv-bento-sub">Stock units requiring replenishment below minimum threshold</div>
               </div>
-              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" className="btn btn-secondary" onClick={() => setShowModal(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary">Save</button>
+              <button
+                className="inv-btn inv-btn-secondary inv-btn-sm"
+                onClick={() => setActiveTab('alerts')}
+              >
+                View All Alerts ({criticalAlerts.length})
+              </button>
+            </div>
+
+            <div className="inv-critical-list">
+              {criticalAlerts.length === 0 ? (
+                <div style={{ fontSize: '13px', color: 'var(--inv-text-muted)', padding: '12px 0' }}>
+                  No critical stock items right now.
+                </div>
+              ) : (
+                criticalAlerts.slice(0, 3).map((item) => (
+                  <div key={item._id} className="inv-critical-item">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      <span style={{ fontWeight: 600, fontSize: '13.5px', color: 'var(--inv-text-title)' }}>
+                        {item.name}
+                      </span>
+                      <span style={{ fontSize: '11.5px', color: 'var(--inv-text-muted)' }}>{item.sku}</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <span style={{ fontWeight: 700, color: '#e11d48', fontVariantNumeric: 'tabular-nums' }}>
+                        {item.stock} / {item.minimumStock} units
+                      </span>
+                      <span className="inv-kpi-pill inv-kpi-pill-critical">Critical</span>
+                      <button
+                        className="inv-btn inv-btn-primary inv-btn-sm"
+                        onClick={() => openModal('in', item._id)}
+                      >
+                        Restock
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Right Panel: Daily Audit Reconciliation Card */}
+          <div className="inv-audit-card">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div className="inv-audit-badge">
+                <FiCheckCircle size={13} color="#10b981" />
+                Audit Status
+              </div>
+              <div className="inv-audit-title">Stock Audit Ready</div>
+              <div className="inv-audit-rate">
+                <strong>{stats.accuracyRate || 98.4}% catalog accuracy</strong> recorded across active inventory clusters.
+              </div>
+            </div>
+
+            <div className="inv-audit-actions">
+              <button className="inv-btn inv-btn-audit-white" onClick={() => openModal('adjust')}>
+                <FiSliders size={14} />
+                Reconcile Cycle Count
+              </button>
+              <button className="inv-btn inv-btn-audit-ghost" onClick={handleExportCsv}>
+                <FiDownload size={14} />
+                Download Audit Log
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------- Action Modals ----------------- */}
+      {modalMode && (
+        <div className="inv-modal-overlay" onClick={closeModal}>
+          <div className="inv-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="inv-modal-header">
+              <div className="inv-modal-title">
+                {modalMode === 'adjust' && <><FiSliders color="var(--inv-teal)" /> Reconcile Stock Adjustment</>}
+                {modalMode === 'in' && <><FiPlus color="var(--inv-teal)" /> Record Inbound Stock</>}
+                {modalMode === 'out' && <><FiMinus color="var(--inv-indigo)" /> Record Outbound Dispatch</>}
+                {modalMode === 'damaged' && <><FiAlertTriangle color="var(--inv-rose)" /> Record Damaged Goods</>}
+              </div>
+              <button className="inv-modal-close" onClick={closeModal}>
+                <FiX />
+              </button>
+            </div>
+
+            <form onSubmit={handleFormSubmit}>
+              <div className="inv-modal-body">
+                {/* Product Selection */}
+                <div className="inv-form-group">
+                  <label className="inv-form-label">
+                    Select Product <span>(required)</span>
+                  </label>
+                  <select
+                    className="inv-form-select"
+                    value={form.productId}
+                    onChange={(e) => setForm({ ...form, productId: e.target.value })}
+                    required
+                  >
+                    <option value="">-- Choose item from catalog --</option>
+                    {productsList.map((p) => (
+                      <option key={p._id} value={p._id}>
+                        {p.name} ({p.sku}) — In Stock: {p.stock}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Stock Adjustment Specific Fields */}
+                {modalMode === 'adjust' && (
+                  <>
+                    <div className="inv-form-group">
+                      <label className="inv-form-label">
+                        Counted Physical Stock <span>(actual units counted)</span>
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        className="inv-form-input"
+                        placeholder="e.g. 48"
+                        value={form.newQuantity}
+                        onChange={(e) => setForm({ ...form, newQuantity: e.target.value })}
+                        required
+                      />
+                    </div>
+
+                    {selectedProduct && form.newQuantity !== '' && (
+                      <div className="inv-differential-banner">
+                        <div>
+                          System Stock: <strong>{selectedProduct.stock}</strong> units
+                        </div>
+                        <div>
+                          Discrepancy:{' '}
+                          <strong
+                            style={{
+                              color:
+                                Number(form.newQuantity) - selectedProduct.stock >= 0 ? '#059669' : '#e11d48',
+                            }}
+                          >
+                            {Number(form.newQuantity) - selectedProduct.stock >= 0 ? '+' : ''}
+                            {Number(form.newQuantity) - selectedProduct.stock} units
+                          </strong>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="inv-form-group">
+                      <label className="inv-form-label">Adjustment Reason</label>
+                      <select
+                        className="inv-form-select"
+                        value={form.reason}
+                        onChange={(e) => setForm({ ...form, reason: e.target.value })}
+                      >
+                        <option value="Cycle Count Variance">Cycle Count Variance</option>
+                        <option value="Physical Audit Reconciliation">Physical Audit Reconciliation</option>
+                        <option value="Found Unrecorded Stock">Found Unrecorded Stock (+)</option>
+                        <option value="Shrinkage / Unaccounted Discrepancy">Shrinkage / Unaccounted Discrepancy (-)</option>
+                        <option value="Clerical Correction">Clerical Correction</option>
+                      </select>
+                    </div>
+                  </>
+                )}
+
+                {/* Stock In Specific Fields */}
+                {modalMode === 'in' && (
+                  <>
+                    <div className="inv-form-group">
+                      <label className="inv-form-label">
+                        Quantity to Add <span>(units)</span>
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        className="inv-form-input"
+                        placeholder="e.g. 50"
+                        value={form.quantity}
+                        onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+                        required
+                      />
+                    </div>
+
+                    {selectedProduct && form.quantity > 0 && (
+                      <div className="inv-differential-banner">
+                        <span>Current Stock: {selectedProduct.stock}</span>
+                        <span>New Total: <strong>{selectedProduct.stock + Number(form.quantity)} units</strong></span>
+                      </div>
+                    )}
+
+                    <div className="inv-form-group">
+                      <label className="inv-form-label">
+                        PO / Reference Number <span>(optional)</span>
+                      </label>
+                      <input
+                        type="text"
+                        className="inv-form-input"
+                        placeholder="e.g. PO-8834 or Delivery Note"
+                        value={form.reference}
+                        onChange={(e) => setForm({ ...form, reference: e.target.value })}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {/* Stock Out Specific Fields */}
+                {modalMode === 'out' && (
+                  <>
+                    <div className="inv-form-group">
+                      <label className="inv-form-label">
+                        Quantity to Deduct <span>(units)</span>
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max={selectedProduct ? selectedProduct.stock : undefined}
+                        className="inv-form-input"
+                        placeholder="e.g. 10"
+                        value={form.quantity}
+                        onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+                        required
+                      />
+                    </div>
+
+                    {selectedProduct && form.quantity > 0 && (
+                      <div className="inv-differential-banner">
+                        <span>Available: {selectedProduct.stock} units</span>
+                        <span>
+                          Remaining:{' '}
+                          <strong style={{ color: selectedProduct.stock - Number(form.quantity) < 0 ? '#e11d48' : '#059669' }}>
+                            {selectedProduct.stock - Number(form.quantity)} units
+                          </strong>
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="inv-form-group">
+                      <label className="inv-form-label">Purpose / Dispatch Reason</label>
+                      <input
+                        type="text"
+                        className="inv-form-input"
+                        placeholder="e.g. Store transfer, demo unit, sample"
+                        value={form.reference}
+                        onChange={(e) => setForm({ ...form, reference: e.target.value })}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {/* Damaged Stock Specific Fields */}
+                {modalMode === 'damaged' && (
+                  <>
+                    <div className="inv-form-group">
+                      <label className="inv-form-label">
+                        Quantity Damaged <span>(units to write off)</span>
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max={selectedProduct ? selectedProduct.stock : undefined}
+                        className="inv-form-input"
+                        placeholder="e.g. 3"
+                        value={form.quantity}
+                        onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+                        required
+                      />
+                    </div>
+
+                    <div className="inv-form-group">
+                      <label className="inv-form-label">Damage Classification</label>
+                      <select
+                        className="inv-form-select"
+                        value={form.reason}
+                        onChange={(e) => setForm({ ...form, reason: e.target.value })}
+                      >
+                        <option value="Damaged in Warehouse Storage">Damaged in Warehouse Storage</option>
+                        <option value="Broken in Transit / Handling">Broken in Transit / Handling</option>
+                        <option value="Expired / Past Shelf Life">Expired / Past Shelf Life</option>
+                        <option value="Defective from Supplier">Defective from Supplier</option>
+                        <option value="Water / Environmental Damage">Water / Environmental Damage</option>
+                      </select>
+                    </div>
+                  </>
+                )}
+
+                {/* Optional Notes */}
+                <div className="inv-form-group">
+                  <label className="inv-form-label">Additional Notes</label>
+                  <textarea
+                    className="inv-form-textarea"
+                    placeholder="Provide any relevant forensic context or audit notes..."
+                    value={form.notes}
+                    onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div className="inv-modal-footer">
+                <button type="button" className="inv-btn inv-btn-secondary" onClick={closeModal}>
+                  Cancel
+                </button>
+                <button type="submit" className="inv-btn inv-btn-primary" disabled={submitting}>
+                  {submitting ? 'Processing...' : 'Confirm Transaction'}
+                </button>
               </div>
             </form>
           </div>
