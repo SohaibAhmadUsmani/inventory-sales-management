@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import api from '../services/api';
 import { toast } from 'react-toastify';
+import PageHeader from '../components/PageHeader';
 
 export default function Categories() {
   const [categories, setCategories] = useState([]);
@@ -71,7 +72,7 @@ export default function Categories() {
 
   return (
     <div>
-      <div className="page-header"><h1>Categories</h1></div>
+      <PageHeader title="Categories" subtitle="Organize your products into categories" />
 
       <div className="card">
         <form onSubmit={handleCreate} style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
