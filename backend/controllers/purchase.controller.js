@@ -142,10 +142,18 @@ exports.createPurchase = async (req, res, next) => {
       totalCost,
       purchaseDate: purchaseDate || new Date(),
       paymentStatus: paymentStatus || 'pending',
-      status: normalizedStatus,
+      status: normalizedStatus === 'received' ? 'ordered' : normalizedStatus,
       notes: notes || '',
       createdBy: req.user.id,
     });
+
+    if (normalizedStatus === 'received') {
+      await applyPurchaseStockIncrease(purchase, req.user.id);
+      await Supplier.findByIdAndUpdate(purchase.supplier, { $inc: { totalPurchases: purchase.totalCost } });
+      purchase.status = 'received';
+      purchase.inventoryApplied = true;
+      await purchase.save();
+    }
 
     await Notification.create({
       type: 'purchase_received',
@@ -181,11 +189,16 @@ exports.updatePurchaseStatus = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Invalid purchase status' });
     }
 
-    const statusChangedToReceived = nextStatus === 'received' && purchase.status !== 'received';
+    if (purchase.status === 'received' && nextStatus !== 'received') {
+      return res.status(400).json({ success: false, message: 'A received purchase cannot be cancelled or reverted' });
+    }
+
+    const statusChangedToReceived = nextStatus === 'received' && purchase.status !== 'received' && !purchase.inventoryApplied;
 
     if (statusChangedToReceived) {
       await applyPurchaseStockIncrease(purchase, req.user.id);
       await Supplier.findByIdAndUpdate(purchase.supplier, { $inc: { totalPurchases: purchase.totalCost } });
+      purchase.inventoryApplied = true;
     }
 
     purchase.status = nextStatus;
