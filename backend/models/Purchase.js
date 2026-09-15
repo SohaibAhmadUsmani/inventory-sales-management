@@ -16,6 +16,7 @@ const purchaseSchema = new mongoose.Schema({
   purchaseDate: { type: Date, required: true },
   paymentStatus: { type: String, enum: ['paid', 'pending', 'partial'], default: 'pending' },
   status: { type: String, enum: ['ordered', 'received', 'cancelled'], default: 'ordered' },
+  inventoryApplied: { type: Boolean, default: false },
   notes: { type: String, default: '' },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
