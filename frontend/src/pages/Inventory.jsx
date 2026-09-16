@@ -40,7 +40,7 @@ export default function Inventory() {
     criticalLowStock: 0,
     movementsToday: 0,
     totalPortfolioValue: 0,
-    accuracyRate: 98.4,
+    accuracyRate: 100,
   });
   const [statsLoading, setStatsLoading] = useState(true);
 
@@ -61,12 +61,16 @@ export default function Inventory() {
   const [currentStockList, setCurrentStockList] = useState([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
 
+  // Real Data: Suppliers and Products for Modals
+  const [productsList, setProductsList] = useState([]);
+  const [suppliersList, setSuppliersList] = useState([]);
+
   // Modals & Action Forms
   // modalMode: null | 'adjust' | 'in' | 'out' | 'damaged'
   const [modalMode, setModalMode] = useState(null);
-  const [productsList, setProductsList] = useState([]);
   const [form, setForm] = useState({
     productId: '',
+    supplierId: '',
     quantity: '',
     newQuantity: '',
     reason: '',
@@ -75,7 +79,7 @@ export default function Inventory() {
   });
   const [submitting, setSubmitting] = useState(false);
 
-  // Fetch KPI statistics
+  // Fetch KPI statistics from live database
   const fetchStats = useCallback(() => {
     setStatsLoading(true);
     api.get('/inventory/stats')
@@ -105,7 +109,7 @@ export default function Inventory() {
     return {};
   }, [dateFilter]);
 
-  // Fetch Movement History Ledger
+  // Fetch Movement History Ledger with filters
   const fetchInventory = useCallback(() => {
     setLoading(true);
     const dateParams = getDateRangeParams();
@@ -149,18 +153,27 @@ export default function Inventory() {
 
   // Fetch products for modal selectors
   const fetchProductsForModal = useCallback(() => {
-    api.get('/products', { params: { limit: 100 } })
+    api.get('/products', { params: { limit: 150 } })
       .then((res) => setProductsList(res.data?.products || []))
       .catch(console.error);
   }, []);
 
-  // Initial Load & Tab synchronization
+  // Fetch real suppliers from Shanza's supplier module if available
+  const fetchSuppliers = useCallback(() => {
+    api.get('/suppliers')
+      .then((res) => setSuppliersList(res.data?.suppliers || []))
+      .catch(() => setSuppliersList([]));
+  }, []);
+
+  // Initial Data Load
   useEffect(() => {
     fetchStats();
     fetchLowStockAlerts();
     fetchProductsForModal();
-  }, [fetchStats, fetchLowStockAlerts, fetchProductsForModal]);
+    fetchSuppliers();
+  }, [fetchStats, fetchLowStockAlerts, fetchProductsForModal, fetchSuppliers]);
 
+  // Tab synchronization
   useEffect(() => {
     if (activeTab === 'history') {
       fetchInventory();
@@ -169,7 +182,7 @@ export default function Inventory() {
     }
   }, [activeTab, fetchInventory, fetchCurrentStock]);
 
-  // Debounced search reset page
+  // Search reset page
   useEffect(() => {
     setPage(1);
   }, [search, typeFilter, dateFilter]);
@@ -212,9 +225,10 @@ export default function Inventory() {
     setModalMode(mode);
     setForm({
       productId: defaultProductId,
+      supplierId: '',
       quantity: '',
       newQuantity: '',
-      reason: '',
+      reason: mode === 'adjust' ? 'Cycle Count Variance' : mode === 'damaged' ? 'Damaged in Warehouse Storage' : '',
       reference: '',
       notes: '',
     });
@@ -222,7 +236,7 @@ export default function Inventory() {
 
   const closeModal = () => {
     setModalMode(null);
-    setForm({ productId: '', quantity: '', newQuantity: '', reason: '', reference: '', notes: '' });
+    setForm({ productId: '', supplierId: '', quantity: '', newQuantity: '', reason: '', reference: '', notes: '' });
   };
 
   // Submit Modal Action
@@ -342,7 +356,7 @@ export default function Inventory() {
           </div>
           <h1 className="inv-title">Inventory Control</h1>
           <p className="inv-subtitle">
-            Monitor stock levels, track forensic movements, and reconcile audit discrepancies across catalog lines.
+            Monitor real-time stock levels, track forensic movements across catalog lines, and execute audit reconciliations.
           </p>
         </div>
 
@@ -370,7 +384,7 @@ export default function Inventory() {
         </div>
       </div>
 
-      {/* ----------------- 4 KPI Stat Cards ----------------- */}
+      {/* ----------------- 4 KPI Stat Cards (Live Data) ----------------- */}
       <div className="inv-kpi-grid">
         {/* Card 1: Total Stocked Items */}
         <div className="inv-kpi-card">
@@ -434,7 +448,7 @@ export default function Inventory() {
             {statsLoading ? '...' : `$${Number(stats.totalPortfolioValue).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`}
           </div>
           <div className="inv-kpi-bottom">
-            <span>• Cost basis inventory valuation</span>
+            <span>• Cost-basis inventory valuation</span>
           </div>
         </div>
       </div>
@@ -466,7 +480,7 @@ export default function Inventory() {
           >
             <FiLayers size={15} />
             Current Stock Levels
-            <span className="inv-tab-count">{stats.totalProductCount || 0}</span>
+            <span className="inv-tab-count">{stats.totalProductCount || productsList.length || 0}</span>
           </button>
         </div>
 
@@ -558,7 +572,9 @@ export default function Inventory() {
                       <div className="inv-empty-state">
                         <FiPackage size={36} color="var(--inv-border-hover)" />
                         <div style={{ fontWeight: 600, color: 'var(--inv-text-title)' }}>No transaction records found</div>
-                        <div style={{ fontSize: '13px' }}>Try adjusting your filters or search terms.</div>
+                        <div style={{ fontSize: '13px' }}>
+                          Start by recording a Stock In or Manual Adjustment above.
+                        </div>
                       </div>
                     </td>
                   </tr>
@@ -673,7 +689,7 @@ export default function Inventory() {
         </div>
       )}
 
-      {/* ----------------- Tab 2: Low Stock Alerts View ----------------- */}
+      {/* ----------------- Tab 2: Low Stock Alerts View (Live Data) ----------------- */}
       {activeTab === 'alerts' && (
         <div className="inv-table-card">
           <div className="inv-table-scroll">
@@ -749,7 +765,7 @@ export default function Inventory() {
         </div>
       )}
 
-      {/* ----------------- Tab 3: Current Stock Catalog ----------------- */}
+      {/* ----------------- Tab 3: Current Stock Catalog (Live Data) ----------------- */}
       {activeTab === 'current' && (
         <div className="inv-table-card">
           <div className="inv-table-scroll">
@@ -845,7 +861,7 @@ export default function Inventory() {
       {/* ----------------- Bottom Bento Grid (Visily 1:1 Layout) ----------------- */}
       {activeTab === 'history' && (
         <div className="inv-bento-grid">
-          {/* Left Panel: Critical Stock Watchlist & Operational Events */}
+          {/* Left Panel: Critical Stock Watchlist */}
           <div className="inv-bento-card">
             <div className="inv-bento-head">
               <div>
@@ -901,7 +917,7 @@ export default function Inventory() {
               </div>
               <div className="inv-audit-title">Stock Audit Ready</div>
               <div className="inv-audit-rate">
-                <strong>{stats.accuracyRate || 98.4}% catalog accuracy</strong> recorded across active inventory clusters.
+                <strong>{stats.accuracyRate || 100}% catalog accuracy</strong> recorded across active inventory clusters.
               </div>
             </div>
 
@@ -919,7 +935,7 @@ export default function Inventory() {
         </div>
       )}
 
-      {/* ----------------- Action Modals ----------------- */}
+      {/* ----------------- Action Modals (With Real Data & Live Calculation) ----------------- */}
       {modalMode && (
         <div className="inv-modal-overlay" onClick={closeModal}>
           <div className="inv-modal" onClick={(e) => e.stopPropagation()}>
@@ -1037,9 +1053,37 @@ export default function Inventory() {
                       </div>
                     )}
 
+                    {/* Dynamic Real Supplier Selector from Shanza's module */}
+                    {suppliersList.length > 0 && (
+                      <div className="inv-form-group">
+                        <label className="inv-form-label">
+                          Supplier <span>(optional)</span>
+                        </label>
+                        <select
+                          className="inv-form-select"
+                          value={form.supplierId || ''}
+                          onChange={(e) => {
+                            const selectedSup = suppliersList.find((s) => s._id === e.target.value);
+                            setForm({
+                              ...form,
+                              supplierId: e.target.value,
+                              reference: selectedSup ? `Delivery from ${selectedSup.name} (${selectedSup.company || ''})` : form.reference,
+                            });
+                          }}
+                        >
+                          <option value="">-- Select Registered Supplier --</option>
+                          {suppliersList.map((s) => (
+                            <option key={s._id} value={s._id}>
+                              {s.name} {s.company ? `(${s.company})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
                     <div className="inv-form-group">
                       <label className="inv-form-label">
-                        PO / Reference Number <span>(optional)</span>
+                        PO / Delivery Reference <span>(optional)</span>
                       </label>
                       <input
                         type="text"
