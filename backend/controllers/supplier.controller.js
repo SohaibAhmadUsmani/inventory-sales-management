@@ -37,9 +37,19 @@ exports.updateSupplier = async (req, res, next) => {
 
 exports.deleteSupplier = async (req, res, next) => {
   try {
-    const supplier = await Supplier.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
+    const supplier = await Supplier.findById(req.params.id);
     if (!supplier) return res.status(404).json({ success: false, message: 'Supplier not found' });
-    res.json({ success: true, message: 'Supplier deleted' });
+
+    const purchaseCount = await Purchase.countDocuments({ supplier: req.params.id });
+    if (purchaseCount > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete supplier because purchase history exists. Please clear purchase records first.',
+      });
+    }
+
+    const deletedSupplier = await Supplier.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
+    res.json({ success: true, message: 'Supplier deleted', supplier: deletedSupplier });
   } catch (err) { next(err); }
 };
 
