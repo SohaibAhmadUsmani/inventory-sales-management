@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
 import { toast } from 'react-toastify';
@@ -141,10 +142,11 @@ export default function Products() {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>Products</h1>
-        <button className="btn btn-primary" onClick={openAddModal}>Add Product</button>
-      </div>
+      <PageHeader
+        title="Products"
+        subtitle="Manage your product catalog, stock levels and pricing"
+        actions={<button className="btn btn-primary" onClick={openAddModal}>Add Product</button>}
+      />
 
       <div className="search-bar" style={{ flexWrap: 'wrap' }}>
         <input

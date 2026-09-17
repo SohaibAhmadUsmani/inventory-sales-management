@@ -338,7 +338,7 @@ exports.exportLedgerCsv = async (req, res, next) => {
 
 /**
  * POST /api/inventory/stock-in
- * Manual stock intake with validation and humanized activity logging
+ * Manual stock intake with atomic increment and humanized activity logging
  */
 exports.stockIn = async (req, res, next) => {
   try {
@@ -348,15 +348,18 @@ exports.stockIn = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Quantity must be a positive integer greater than zero.' });
     }
 
-    const product = await Product.findById(productId);
+    // Atomically increment stock and return the updated product document
+    const product = await Product.findByIdAndUpdate(
+      productId,
+      { $inc: { stock: qty } },
+      { new: true }
+    );
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found.' });
     }
 
-    const previousStock = product.stock;
-    product.stock += qty;
-    await product.save();
-
+    const currentStock = product.stock;
+    const previousStock = currentStock - qty;
     const trxId = reference && reference.trim() ? reference.trim() : generateTrxId();
 
     const record = await Inventory.create({
@@ -364,17 +367,17 @@ exports.stockIn = async (req, res, next) => {
       type: 'stock_in',
       quantity: qty,
       previousStock,
-      currentStock: product.stock,
+      currentStock,
       reference: trxId,
       notes: notes || 'Manual Stock Inbound',
       performedBy: req.user.id,
     });
 
-    if (product.stock <= product.minimumStock) {
+    if (currentStock <= product.minimumStock) {
       await Notification.create({
         type: 'low_stock',
         title: 'Low Stock Alert',
-        message: `${product.name} is currently low in stock (${product.stock} units remaining).`,
+        message: `${product.name} is currently low in stock (${currentStock} units remaining).`,
       });
     }
 
@@ -384,7 +387,7 @@ exports.stockIn = async (req, res, next) => {
       action: 'Stock In',
       entity: 'Inventory',
       entityId: record._id,
-      details: `${userDisplayName} logged stock intake of +${qty} units for ${product.name} (${product.sku}). Balance updated to ${product.stock}.`,
+      details: `${userDisplayName} logged stock intake of +${qty} units for ${product.name} (${product.sku}). Balance updated to ${currentStock}.`,
     });
 
     res.status(201).json({
@@ -400,7 +403,7 @@ exports.stockIn = async (req, res, next) => {
 
 /**
  * POST /api/inventory/stock-out
- * Manual stock dispatch with negative balance protection
+ * Manual stock dispatch with atomic deduction and negative balance protection
  */
 exports.stockOut = async (req, res, next) => {
   try {
@@ -410,22 +413,26 @@ exports.stockOut = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Quantity must be a positive integer greater than zero.' });
     }
 
-    const product = await Product.findById(productId);
-    if (!product) {
-      return res.status(404).json({ success: false, message: 'Product not found.' });
-    }
+    // Atomic deduction: only updates if current stock is at least qty
+    const product = await Product.findOneAndUpdate(
+      { _id: productId, stock: { $gte: qty } },
+      { $inc: { stock: -qty } },
+      { new: true }
+    );
 
-    if (product.stock < qty) {
+    if (!product) {
+      const existingProduct = await Product.findById(productId);
+      if (!existingProduct) {
+        return res.status(404).json({ success: false, message: 'Product not found.' });
+      }
       return res.status(400).json({
         success: false,
-        message: `Insufficient stock for ${product.name}. Available: ${product.stock}, requested: ${qty}.`,
+        message: `Insufficient stock for ${existingProduct.name}. Available on hand: ${existingProduct.stock} units, requested: ${qty} units.`,
       });
     }
 
-    const previousStock = product.stock;
-    product.stock -= qty;
-    await product.save();
-
+    const currentStock = product.stock;
+    const previousStock = currentStock + qty;
     const trxId = reference && reference.trim() ? reference.trim() : generateTrxId();
 
     const record = await Inventory.create({
@@ -433,17 +440,17 @@ exports.stockOut = async (req, res, next) => {
       type: 'stock_out',
       quantity: qty,
       previousStock,
-      currentStock: product.stock,
+      currentStock,
       reference: trxId,
       notes: notes || 'Manual Stock Outbound',
       performedBy: req.user.id,
     });
 
-    if (product.stock <= product.minimumStock) {
+    if (currentStock <= product.minimumStock) {
       await Notification.create({
         type: 'low_stock',
         title: 'Low Stock Alert',
-        message: `${product.name} is low in stock (${product.stock} units remaining).`,
+        message: `${product.name} is low in stock (${currentStock} units remaining).`,
       });
     }
 
@@ -453,7 +460,7 @@ exports.stockOut = async (req, res, next) => {
       action: 'Stock Out',
       entity: 'Inventory',
       entityId: record._id,
-      details: `${userDisplayName} dispatched -${qty} units of ${product.name} (${product.sku}). Remaining balance: ${product.stock}.`,
+      details: `${userDisplayName} dispatched -${qty} units of ${product.name} (${product.sku}). Remaining balance: ${currentStock}.`,
     });
 
     res.status(201).json({
@@ -469,7 +476,7 @@ exports.stockOut = async (req, res, next) => {
 
 /**
  * POST /api/inventory/damaged
- * Records broken/expired goods with damage classification
+ * Records broken/expired goods with atomic deduction
  */
 exports.damagedStock = async (req, res, next) => {
   try {
@@ -479,22 +486,26 @@ exports.damagedStock = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Damaged quantity must be a positive number.' });
     }
 
-    const product = await Product.findById(productId);
-    if (!product) {
-      return res.status(404).json({ success: false, message: 'Product not found.' });
-    }
+    // Atomic deduction: only updates if stock >= qty
+    const product = await Product.findOneAndUpdate(
+      { _id: productId, stock: { $gte: qty } },
+      { $inc: { stock: -qty } },
+      { new: true }
+    );
 
-    if (product.stock < qty) {
+    if (!product) {
+      const existingProduct = await Product.findById(productId);
+      if (!existingProduct) {
+        return res.status(404).json({ success: false, message: 'Product not found.' });
+      }
       return res.status(400).json({
         success: false,
-        message: `Cannot write off ${qty} units of ${product.name}. Available on hand: ${product.stock}.`,
+        message: `Cannot write off ${qty} units of ${existingProduct.name}. Available on hand: ${existingProduct.stock} units.`,
       });
     }
 
-    const previousStock = product.stock;
-    product.stock -= qty;
-    await product.save();
-
+    const currentStock = product.stock;
+    const previousStock = currentStock + qty;
     const trxId = generateTrxId();
     const damageDescription = reason ? `${reason}${notes ? `: ${notes}` : ''}` : notes || 'Damaged in warehouse';
 
@@ -503,17 +514,17 @@ exports.damagedStock = async (req, res, next) => {
       type: 'damaged',
       quantity: qty,
       previousStock,
-      currentStock: product.stock,
+      currentStock,
       reference: trxId,
       notes: damageDescription,
       performedBy: req.user.id,
     });
 
-    if (product.stock <= product.minimumStock) {
+    if (currentStock <= product.minimumStock) {
       await Notification.create({
         type: 'low_stock',
         title: 'Low Stock Alert',
-        message: `${product.name} is now low in stock (${product.stock} units) following damage write-off.`,
+        message: `${product.name} is now low in stock (${currentStock} units) following damage write-off.`,
       });
     }
 
@@ -550,15 +561,16 @@ exports.adjustStock = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Counted physical stock must be a non-negative number.' });
     }
 
-    const product = await Product.findById(productId);
-    if (!product) {
+    const existingProduct = await Product.findById(productId);
+    if (!existingProduct) {
       return res.status(404).json({ success: false, message: 'Product not found.' });
     }
 
-    const previousStock = product.stock;
+    const previousStock = existingProduct.stock;
     const diff = countedQty - previousStock;
-    product.stock = countedQty;
-    await product.save();
+
+    existingProduct.stock = countedQty;
+    await existingProduct.save();
 
     const trxId = generateTrxId();
     const rationale = reason ? `${reason}${notes ? ` - ${notes}` : ''}` : notes || 'Cycle count reconciliation';
@@ -574,11 +586,11 @@ exports.adjustStock = async (req, res, next) => {
       performedBy: req.user.id,
     });
 
-    if (product.stock <= product.minimumStock) {
+    if (countedQty <= existingProduct.minimumStock) {
       await Notification.create({
         type: 'low_stock',
         title: 'Low Stock Alert',
-        message: `${product.name} is low in stock (${product.stock} units remaining) after count adjustment.`,
+        message: `${existingProduct.name} is low in stock (${countedQty} units remaining) after count adjustment.`,
       });
     }
 
@@ -588,14 +600,14 @@ exports.adjustStock = async (req, res, next) => {
       action: 'Stock Adjustment',
       entity: 'Inventory',
       entityId: record._id,
-      details: `${userDisplayName} reconciled ${product.name} (${product.sku}) from ${previousStock} to ${countedQty} (${diff >= 0 ? '+' : ''}${diff} diff). Reason: ${rationale}.`,
+      details: `${userDisplayName} reconciled ${existingProduct.name} (${existingProduct.sku}) from ${previousStock} to ${countedQty} (${diff >= 0 ? '+' : ''}${diff} diff). Reason: ${rationale}.`,
     });
 
     res.status(201).json({
       success: true,
-      message: `Reconciled ${product.name} stock: ${previousStock} → ${countedQty} (${diff >= 0 ? '+' : ''}${diff} diff).`,
+      message: `Reconciled ${existingProduct.name} stock: ${previousStock} → ${countedQty} (${diff >= 0 ? '+' : ''}${diff} diff).`,
       record,
-      product,
+      product: existingProduct,
       diff,
     });
   } catch (err) {
