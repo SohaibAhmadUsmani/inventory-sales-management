@@ -100,7 +100,8 @@ exports.createSale = async (req, res, next) => {
       await Inventory.create({
         product: item.product, type: 'sale', quantity: item.quantity,
         previousStock, currentStock: product.stock, performedBy: req.user.id,
-        reference: 'Sale', referenceId: sale._id,
+        reference: sale.invoiceNumber, referenceId: sale._id,
+        notes: `Sale completed via ${paymentMethod || 'cash'} (Invoice: ${sale.invoiceNumber})`,
       });
       if (product.stock <= product.minimumStock) {
         await Notification.create({ type: 'low_stock', title: 'Low Stock Alert', message: `${product.name} is low in stock (${product.stock} remaining)` });

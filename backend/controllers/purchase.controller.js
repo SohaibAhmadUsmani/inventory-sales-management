@@ -31,11 +31,12 @@ const applyPurchaseStockIncrease = async (purchase, userId) => {
 
     await Inventory.create({
       product: item.product,
+      supplier: purchase.supplier || null,
       type: 'purchase',
       quantity: item.quantity,
       previousStock,
       currentStock: product.stock,
-      reference: 'Purchase',
+      reference: purchase.orderNumber,
       referenceId: purchase._id,
       notes: `Received purchase order ${purchase.orderNumber}`,
       performedBy: userId,

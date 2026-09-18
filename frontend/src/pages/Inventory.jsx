@@ -20,6 +20,11 @@ import {
   FiChevronRight,
   FiPackage,
   FiLayers,
+  FiActivity,
+  FiEye,
+  FiFileText,
+  FiCalendar,
+  FiFilter,
 } from 'react-icons/fi';
 import './Inventory.css';
 
@@ -55,18 +60,23 @@ export default function Inventory() {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
+  const [customStartDate, setCustomStartDate] = useState('');
+  const [customEndDate, setCustomEndDate] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [supplierFilter, setSupplierFilter] = useState('');
+  const [catalogStatusFilter, setCatalogStatusFilter] = useState('all');
 
   // Critical Alerts & Catalog
   const [criticalAlerts, setCriticalAlerts] = useState([]);
   const [currentStockList, setCurrentStockList] = useState([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
 
-  // Real Data: Suppliers and Products for Modals
+  // Real Data: Suppliers, Products, and Categories
   const [productsList, setProductsList] = useState([]);
   const [suppliersList, setSuppliersList] = useState([]);
+  const [categoriesList, setCategoriesList] = useState([]);
 
   // Modals & Action Forms
-  // modalMode: null | 'adjust' | 'in' | 'out' | 'damaged'
   const [modalMode, setModalMode] = useState(null);
   const [form, setForm] = useState({
     productId: '',
@@ -78,6 +88,16 @@ export default function Inventory() {
     notes: '',
   });
   const [submitting, setSubmitting] = useState(false);
+  const [exporting, setExporting] = useState(null);
+
+  // Product Stock Audit Modal (Section 4 Exemplar)
+  const [auditModal, setAuditModal] = useState({
+    open: false,
+    loading: false,
+    product: null,
+    audit: null,
+    history: [],
+  });
 
   // Fetch KPI statistics from live database
   const fetchStats = useCallback(() => {
@@ -92,7 +112,7 @@ export default function Inventory() {
       .finally(() => setStatsLoading(false));
   }, []);
 
-  // Calculate start date string based on preset
+  // Calculate start date string based on preset or custom range
   const getDateRangeParams = useCallback(() => {
     if (dateFilter === 'today') {
       const today = new Date().toISOString().split('T')[0];
@@ -106,8 +126,14 @@ export default function Inventory() {
       const d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       return { startDate: d };
     }
+    if (dateFilter === 'custom') {
+      return {
+        startDate: customStartDate || undefined,
+        endDate: customEndDate || undefined,
+      };
+    }
     return {};
-  }, [dateFilter]);
+  }, [dateFilter, customStartDate, customEndDate]);
 
   // Fetch Movement History Ledger with filters
   const fetchInventory = useCallback(() => {
@@ -119,6 +145,8 @@ export default function Inventory() {
         limit: 10,
         search: search.trim() || undefined,
         type: typeFilter !== 'all' ? typeFilter : undefined,
+        category: categoryFilter || undefined,
+        supplier: supplierFilter || undefined,
         ...dateParams,
       },
     })
@@ -131,7 +159,7 @@ export default function Inventory() {
         toast.error(err.response?.data?.message || 'Failed to load movement logs');
       })
       .finally(() => setLoading(false));
-  }, [page, search, typeFilter, getDateRangeParams]);
+  }, [page, search, typeFilter, categoryFilter, supplierFilter, getDateRangeParams]);
 
   // Fetch Critical Low Stock Items
   const fetchLowStockAlerts = useCallback(() => {
@@ -144,12 +172,17 @@ export default function Inventory() {
   const fetchCurrentStock = useCallback(() => {
     setCatalogLoading(true);
     api.get('/inventory/current-stock', {
-      params: { search: search.trim() || undefined, limit: 50 },
+      params: {
+        search: search.trim() || undefined,
+        category: categoryFilter || undefined,
+        status: catalogStatusFilter !== 'all' ? catalogStatusFilter : undefined,
+        limit: 100,
+      },
     })
       .then((res) => setCurrentStockList(res.data?.products || []))
       .catch(console.error)
       .finally(() => setCatalogLoading(false));
-  }, [search]);
+  }, [search, categoryFilter, catalogStatusFilter]);
 
   // Fetch products for modal selectors
   const fetchProductsForModal = useCallback(() => {
@@ -158,20 +191,31 @@ export default function Inventory() {
       .catch(console.error);
   }, []);
 
-  // Fetch real suppliers from Shanza's supplier module if available
+  // Fetch real suppliers
   const fetchSuppliers = useCallback(() => {
     api.get('/suppliers')
       .then((res) => setSuppliersList(res.data?.suppliers || []))
       .catch(() => setSuppliersList([]));
   }, []);
 
-  // Initial Data Load
+  // Fetch product categories
+  const fetchCategories = useCallback(() => {
+    api.get('/categories')
+      .then((res) => setCategoriesList(res.data?.categories || []))
+      .catch(() => setCategoriesList([]));
+  }, []);
+
+  // Initial Data Load & Consolidated Alert Trigger
   useEffect(() => {
     fetchStats();
     fetchLowStockAlerts();
     fetchProductsForModal();
     fetchSuppliers();
-  }, [fetchStats, fetchLowStockAlerts, fetchProductsForModal, fetchSuppliers]);
+    fetchCategories();
+
+    // Trigger Section 13 batch threshold alert check
+    api.post('/inventory/batch-check-alerts').catch(() => {});
+  }, [fetchStats, fetchLowStockAlerts, fetchProductsForModal, fetchSuppliers, fetchCategories]);
 
   // Tab synchronization
   useEffect(() => {
@@ -182,30 +226,60 @@ export default function Inventory() {
     }
   }, [activeTab, fetchInventory, fetchCurrentStock]);
 
-  // Search reset page
+  // Search & filter reset page
   useEffect(() => {
     setPage(1);
-  }, [search, typeFilter, dateFilter]);
+  }, [search, typeFilter, dateFilter, customStartDate, customEndDate, categoryFilter, supplierFilter]);
 
   // Selected product helper for real-time calculations in modals
   const selectedProduct = useMemo(() => {
     return productsList.find((p) => p._id === form.productId) || null;
   }, [productsList, form.productId]);
 
+  // Open Product Stock Audit Modal (Section 4 Exemplar)
+  const openProductAudit = (productId) => {
+    if (!productId) return;
+    setAuditModal({ open: true, loading: true, product: null, audit: null, history: [] });
+    api.get(`/inventory/product/${productId}`)
+      .then((res) => {
+        if (res.data?.success) {
+          setAuditModal({
+            open: true,
+            loading: false,
+            product: res.data.product,
+            audit: res.data.audit,
+            history: res.data.history || [],
+          });
+        }
+      })
+      .catch((err) => {
+        toast.error(err.response?.data?.message || 'Failed to load product audit breakdown');
+        setAuditModal({ open: false, loading: false, product: null, audit: null, history: [] });
+      });
+  };
+
+  const closeProductAudit = () => {
+    setAuditModal({ open: false, loading: false, product: null, audit: null, history: [] });
+  };
+
+  // Build export query params
+  const buildExportParams = () => {
+    const dateParams = getDateRangeParams();
+    return new URLSearchParams({
+      type: typeFilter,
+      search: search.trim(),
+      category: categoryFilter,
+      supplier: supplierFilter,
+      ...dateParams,
+    }).toString();
+  };
+
   // Handle Export Log (CSV)
   const handleExportCsv = async () => {
+    setExporting('csv');
     try {
-      const dateParams = getDateRangeParams();
-      const params = new URLSearchParams({
-        type: typeFilter,
-        search: search.trim(),
-        ...dateParams,
-      }).toString();
-
-      const response = await api.get(`/inventory/export-csv?${params}`, {
-        responseType: 'blob',
-      });
-
+      const params = buildExportParams();
+      const response = await api.get(`/inventory/export-csv?${params}`, { responseType: 'blob' });
       const blob = new Blob([response.data], { type: 'text/csv;charset=utf-8;' });
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -214,9 +288,57 @@ export default function Inventory() {
       document.body.appendChild(link);
       link.click();
       link.remove();
-      toast.success('Inventory ledger exported successfully');
+      toast.success('Inventory ledger exported to CSV');
     } catch (err) {
       toast.error('Failed to export inventory logs');
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  // Handle Export Log (Excel .xlsx)
+  const handleExportExcel = async () => {
+    setExporting('excel');
+    try {
+      const params = buildExportParams();
+      const response = await api.get(`/inventory/export-excel?${params}`, { responseType: 'blob' });
+      const blob = new Blob([response.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `inventory-ledger-${new Date().toISOString().slice(0, 10)}.xlsx`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success('Inventory workbook exported to Excel');
+    } catch (err) {
+      toast.error('Failed to export Excel workbook');
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  // Handle Export Log (Printable PDF Audit)
+  const handleExportPdf = async () => {
+    setExporting('pdf');
+    try {
+      const params = buildExportParams();
+      const response = await api.get(`/inventory/export-pdf?${params}`, { responseType: 'blob' });
+      const blob = new Blob([response.data], { type: 'application/pdf' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `inventory-audit-report-${new Date().toISOString().slice(0, 10)}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success('Audit report exported to PDF');
+    } catch (err) {
+      toast.error('Failed to export PDF report');
+    } finally {
+      setExporting(null);
     }
   };
 
@@ -228,7 +350,12 @@ export default function Inventory() {
       supplierId: '',
       quantity: '',
       newQuantity: '',
-      reason: mode === 'adjust' ? 'Cycle Count Variance' : mode === 'damaged' ? 'Damaged in Warehouse Storage' : '',
+      reason:
+        mode === 'adjust'
+          ? 'Cycle Count Variance'
+          : mode === 'damaged'
+          ? 'Damaged in Warehouse Storage'
+          : '',
       reference: '',
       notes: '',
     });
@@ -310,6 +437,13 @@ export default function Inventory() {
   // Helper for vector pill styling
   const renderVectorBadge = (type) => {
     switch (type) {
+      case 'opening_stock':
+        return (
+          <span className="inv-vector-badge inv-vector-opening">
+            <FiPackage size={12} />
+            Opening
+          </span>
+        );
       case 'stock_in':
       case 'purchase':
         return (
@@ -345,6 +479,19 @@ export default function Inventory() {
     }
   };
 
+  // Helper for reference pill badges
+  const renderRefPill = (ref) => {
+    if (!ref) return <span className="inv-ref-badge inv-ref-badge-general">MANUAL</span>;
+    const isInv = ref.startsWith('INV-');
+    const isPo = ref.startsWith('PO-');
+    const isOpn = ref.startsWith('OPN-');
+    let pillClass = 'inv-ref-badge-general';
+    if (isInv) pillClass = 'inv-ref-badge-inv';
+    if (isPo) pillClass = 'inv-ref-badge-po';
+    if (isOpn) pillClass = 'inv-ref-badge-opn';
+    return <span className={`inv-ref-badge ${pillClass}`}>{ref}</span>;
+  };
+
   return (
     <div className="inv-container">
       {/* ----------------- Top Control Bar & Header ----------------- */}
@@ -361,10 +508,35 @@ export default function Inventory() {
         </div>
 
         <div className="inv-header-actions">
-          <button className="inv-btn inv-btn-secondary" onClick={handleExportCsv}>
-            <FiDownload size={15} />
-            Export Log
-          </button>
+          <div className="inv-export-group">
+            <button
+              className="inv-btn inv-btn-secondary"
+              onClick={handleExportCsv}
+              disabled={exporting !== null}
+              title="Export raw CSV ledger"
+            >
+              <FiDownload size={14} />
+              {exporting === 'csv' ? 'CSV...' : 'CSV'}
+            </button>
+            <button
+              className="inv-btn inv-btn-secondary"
+              onClick={handleExportExcel}
+              disabled={exporting !== null}
+              title="Export formatted Excel workbook (.xlsx)"
+            >
+              <FiFileText size={14} />
+              {exporting === 'excel' ? 'Excel...' : 'Excel'}
+            </button>
+            <button
+              className="inv-btn inv-btn-secondary"
+              onClick={handleExportPdf}
+              disabled={exporting !== null}
+              title="Export printable PDF audit report"
+            >
+              <FiDownload size={14} />
+              {exporting === 'pdf' ? 'PDF...' : 'PDF'}
+            </button>
+          </div>
           <button className="inv-btn inv-btn-primary" onClick={() => openModal('adjust')}>
             <FiSliders size={15} />
             Manual Adjustment
@@ -492,13 +664,17 @@ export default function Inventory() {
         )}
       </div>
 
-      {/* ----------------- Toolbar: Search & Vector Filters ----------------- */}
+      {/* ----------------- Toolbar: Search & Multi-Dimensional Filters ----------------- */}
       <div className="inv-toolbar">
         <div className="inv-search-wrap">
           <FiSearch size={16} color="var(--inv-text-muted)" />
           <input
             type="text"
-            placeholder="Search SKU, product name, or reference ID..."
+            placeholder={
+              activeTab === 'current'
+                ? 'Filter catalog by product name or SKU...'
+                : 'Search SKU, product name, or reference ID...'
+            }
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -520,11 +696,42 @@ export default function Inventory() {
               onChange={(e) => setTypeFilter(e.target.value)}
             >
               <option value="all">All Vectors</option>
+              <option value="opening_stock">Opening Stock</option>
               <option value="inbound">Inbound (Stock In / PO)</option>
               <option value="outbound">Outbound (Stock Out / Sale)</option>
               <option value="adjustment">Adjustments</option>
               <option value="damaged">Damaged Goods</option>
             </select>
+
+            {categoriesList.length > 0 && (
+              <select
+                className="inv-select"
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+              >
+                <option value="">All Categories</option>
+                {categoriesList.map((cat) => (
+                  <option key={cat._id} value={cat._id}>
+                    {cat.name}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            {suppliersList.length > 0 && (
+              <select
+                className="inv-select"
+                value={supplierFilter}
+                onChange={(e) => setSupplierFilter(e.target.value)}
+              >
+                <option value="">All Suppliers</option>
+                {suppliersList.map((sup) => (
+                  <option key={sup._id} value={sup._id}>
+                    {sup.name}
+                  </option>
+                ))}
+              </select>
+            )}
 
             <select
               className="inv-select"
@@ -535,6 +742,57 @@ export default function Inventory() {
               <option value="today">Today</option>
               <option value="7days">Last 7 Days</option>
               <option value="30days">Last 30 Days</option>
+              <option value="custom">Custom Range</option>
+            </select>
+
+            {dateFilter === 'custom' && (
+              <div className="inv-custom-dates">
+                <input
+                  type="date"
+                  className="inv-date-input"
+                  value={customStartDate}
+                  onChange={(e) => setCustomStartDate(e.target.value)}
+                  title="Start Date"
+                />
+                <span style={{ color: 'var(--inv-text-muted)', fontSize: '12px' }}>to</span>
+                <input
+                  type="date"
+                  className="inv-date-input"
+                  value={customEndDate}
+                  onChange={(e) => setCustomEndDate(e.target.value)}
+                  title="End Date"
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'current' && (
+          <div className="inv-filters-group">
+            {categoriesList.length > 0 && (
+              <select
+                className="inv-select"
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+              >
+                <option value="">All Categories</option>
+                {categoriesList.map((cat) => (
+                  <option key={cat._id} value={cat._id}>
+                    {cat.name}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            <select
+              className="inv-select"
+              value={catalogStatusFilter}
+              onChange={(e) => setCatalogStatusFilter(e.target.value)}
+            >
+              <option value="all">All Stock Statuses</option>
+              <option value="in_stock">In Stock</option>
+              <option value="low_stock">Low Stock</option>
+              <option value="out_of_stock">Out of Stock</option>
             </select>
           </div>
         )}
@@ -551,24 +809,25 @@ export default function Inventory() {
                   <th>Product / SKU</th>
                   <th>Type</th>
                   <th>Differential</th>
-                  <th>Reason / Note</th>
+                  <th>Category / Supplier</th>
+                  <th>Reason / Notes</th>
                   <th>Date & Time</th>
-                  <th>User</th>
-                  <th>Status</th>
+                  <th>Operator</th>
+                  <th>Audit</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
                   Array.from({ length: 5 }).map((_, idx) => (
                     <tr key={idx}>
-                      <td colSpan={8} style={{ padding: '16px' }}>
+                      <td colSpan={9} style={{ padding: '16px' }}>
                         <div className="inv-skeleton" style={{ height: '28px', width: '100%' }} />
                       </td>
                     </tr>
                   ))
                 ) : records.length === 0 ? (
                   <tr>
-                    <td colSpan={8}>
+                    <td colSpan={9}>
                       <div className="inv-empty-state">
                         <FiPackage size={36} color="var(--inv-border-hover)" />
                         <div style={{ fontWeight: 600, color: 'var(--inv-text-title)' }}>No transaction records found</div>
@@ -586,19 +845,23 @@ export default function Inventory() {
 
                     return (
                       <tr key={r._id}>
-                        {/* Reference ID & Date */}
+                        {/* Reference ID & Badge */}
                         <td>
                           <div className="inv-ref-col">
-                            <span className="inv-ref-code">{r.trxCode}</span>
+                            {renderRefPill(r.reference || r.trxCode)}
                             <span className="inv-ref-time">
                               {new Date(r.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </span>
                           </div>
                         </td>
 
-                        {/* Product Thumbnail & SKU */}
+                        {/* Product Thumbnail & SKU (Clickable Audit) */}
                         <td>
-                          <div className="inv-prod-cell">
+                          <div
+                            className="inv-prod-cell inv-clickable-prod"
+                            onClick={() => openProductAudit(r.product?._id)}
+                            title="Click to view full forensic stock audit (Section 4)"
+                          >
                             <div className="inv-prod-thumb">
                               {r.product?.image ? (
                                 <img src={resolveImageUrl(r.product.image)} alt={r.product.name} />
@@ -627,9 +890,23 @@ export default function Inventory() {
                           </span>
                         </td>
 
+                        {/* Category & Supplier Metadata */}
+                        <td>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                            <span style={{ fontSize: '12.5px', fontWeight: 600, color: 'var(--inv-text-title)' }}>
+                              {r.product?.category?.name || r.category?.name || 'General'}
+                            </span>
+                            {r.supplier?.name && (
+                              <span style={{ fontSize: '11.5px', color: 'var(--inv-teal-dark)', fontWeight: 500 }}>
+                                {r.supplier.name}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
                         {/* Reason / Note */}
                         <td>
-                          <div style={{ maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          <div style={{ maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.notes || r.reference || 'Manual movement'}>
                             {r.notes || r.reference || 'Manual movement'}
                           </div>
                         </td>
@@ -647,9 +924,16 @@ export default function Inventory() {
                           </div>
                         </td>
 
-                        {/* Status */}
+                        {/* Forensic Audit Action */}
                         <td>
-                          <span className="inv-status-pill inv-status-completed">Completed</span>
+                          <button
+                            className="inv-btn inv-btn-secondary inv-btn-sm"
+                            onClick={() => openProductAudit(r.product?._id)}
+                            title="Audit Stock Breakdown (Section 4)"
+                          >
+                            <FiActivity size={12} />
+                            Audit
+                          </button>
                         </td>
                       </tr>
                     );
@@ -720,7 +1004,11 @@ export default function Inventory() {
                   criticalAlerts.map((item) => (
                     <tr key={item._id}>
                       <td>
-                        <div className="inv-prod-cell">
+                        <div
+                          className="inv-prod-cell inv-clickable-prod"
+                          onClick={() => openProductAudit(item._id)}
+                          title="Click to view full forensic stock audit (Section 4)"
+                        >
                           <div className="inv-prod-thumb">
                             {item.image ? (
                               <img src={resolveImageUrl(item.image)} alt={item.name} />
@@ -748,13 +1036,23 @@ export default function Inventory() {
                       </td>
                       <td>{item.supplier || 'Not linked'}</td>
                       <td>
-                        <button
-                          className="inv-btn inv-btn-inbound-outline inv-btn-sm"
-                          onClick={() => openModal('in', item._id)}
-                        >
-                          <FiPlus size={13} />
-                          Quick Restock
-                        </button>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            className="inv-btn inv-btn-inbound-outline inv-btn-sm"
+                            onClick={() => openModal('in', item._id)}
+                            title="Quick Restock"
+                          >
+                            <FiPlus size={13} />
+                            Restock
+                          </button>
+                          <button
+                            className="inv-btn inv-btn-secondary inv-btn-sm"
+                            onClick={() => openProductAudit(item._id)}
+                            title="Audit Stock Breakdown (Section 4)"
+                          >
+                            <FiActivity size={13} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -801,7 +1099,11 @@ export default function Inventory() {
                   currentStockList.map((p) => (
                     <tr key={p._id}>
                       <td>
-                        <div className="inv-prod-cell">
+                        <div
+                          className="inv-prod-cell inv-clickable-prod"
+                          onClick={() => openProductAudit(p._id)}
+                          title="Click to view full forensic stock audit (Section 4)"
+                        >
                           <div className="inv-prod-thumb">
                             {p.image ? (
                               <img src={resolveImageUrl(p.image)} alt={p.name} />
@@ -833,6 +1135,13 @@ export default function Inventory() {
                       </td>
                       <td>
                         <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            className="inv-btn inv-btn-secondary inv-btn-sm"
+                            title="Audit Breakdown (Section 4)"
+                            onClick={() => openProductAudit(p._id)}
+                          >
+                            <FiActivity size={12} />
+                          </button>
                           <button
                             className="inv-btn inv-btn-secondary inv-btn-sm"
                             title="Adjust Stock"
@@ -1197,6 +1506,253 @@ export default function Inventory() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------- Forensic Product Stock Audit Modal (Section 4 Exemplar) ----------------- */}
+      {auditModal.open && (
+        <div className="inv-modal-overlay" onClick={closeProductAudit}>
+          <div className="inv-modal inv-modal-wide" onClick={(e) => e.stopPropagation()}>
+            <div className="inv-modal-header">
+              <div className="inv-modal-title">
+                <FiActivity color="var(--inv-teal)" size={18} />
+                <span>Forensic Stock Audit & Movement Breakdown</span>
+              </div>
+              <button className="inv-modal-close" onClick={closeProductAudit}>
+                <FiX />
+              </button>
+            </div>
+
+            <div className="inv-modal-body">
+              {auditModal.loading ? (
+                <div style={{ padding: '36px', textAlign: 'center' }}>
+                  <div className="inv-skeleton" style={{ height: '32px', marginBottom: '16px' }} />
+                  <div className="inv-skeleton" style={{ height: '120px', marginBottom: '16px' }} />
+                  <div className="inv-skeleton" style={{ height: '200px' }} />
+                </div>
+              ) : auditModal.audit ? (
+                <>
+                  {/* Product Header Banner */}
+                  <div className="inv-audit-prod-banner">
+                    <div className="inv-audit-prod-info">
+                      <div className="inv-prod-thumb" style={{ width: '48px', height: '48px', fontSize: '18px' }}>
+                        {auditModal.product?.image ? (
+                          <img src={resolveImageUrl(auditModal.product.image)} alt={auditModal.product.name} />
+                        ) : (
+                          auditModal.product?.name?.[0]?.toUpperCase() || 'P'
+                        )}
+                      </div>
+                      <div>
+                        <h3 className="inv-audit-prod-title">{auditModal.product?.name}</h3>
+                        <div className="inv-audit-prod-meta">
+                          <span>SKU: <strong>{auditModal.product?.sku}</strong></span>
+                          <span>•</span>
+                          <span>Category: <strong>{auditModal.product?.category?.name || 'General'}</strong></span>
+                          <span>•</span>
+                          <span>Unit Cost: <strong>${auditModal.product?.cost || 0}</strong></span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="inv-audit-stock-badge">
+                      <span className="inv-audit-stock-label">Current Stock On Hand</span>
+                      <span className="inv-audit-stock-val">{auditModal.audit.currentStock} units</span>
+                    </div>
+                  </div>
+
+                  {/* Section 4 Reconciliation Formula Banner */}
+                  <div className="inv-equation-banner">
+                    <div className="inv-equation-title">
+                      <FiFileText size={14} />
+                      Section 4 Inventory Audit Balance Formula:
+                    </div>
+                    <div className="inv-equation-formula">
+                      <span className="inv-eq-term">Opening ({auditModal.audit.openingStock})</span>
+                      <span className="inv-eq-op">+</span>
+                      <span className="inv-eq-term">Inbound ({auditModal.audit.totalInbound})</span>
+                      <span className="inv-eq-op">-</span>
+                      <span className="inv-eq-term">Sold ({auditModal.audit.totalSold})</span>
+                      <span className="inv-eq-op">-</span>
+                      <span className="inv-eq-term">Damaged ({auditModal.audit.totalDamaged})</span>
+                      <span className="inv-eq-op">±</span>
+                      <span className="inv-eq-term">
+                        Adjustments ({auditModal.audit.netAdjustments >= 0 ? `+${auditModal.audit.netAdjustments}` : auditModal.audit.netAdjustments})
+                      </span>
+                      <span className="inv-eq-op">=</span>
+                      <span className="inv-eq-result">
+                        Current Stock ({auditModal.audit.currentStock})
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* 6-Card KPI Breakdown Grid */}
+                  <div className="inv-audit-kpi-grid">
+                    <div className="inv-audit-kpi-box">
+                      <span className="inv-audit-kpi-lbl">Opening Stock</span>
+                      <span className="inv-audit-kpi-num" style={{ color: '#475569' }}>
+                        {auditModal.audit.openingStock}
+                      </span>
+                      <span className="inv-audit-kpi-sub">Baseline recorded</span>
+                    </div>
+                    <div className="inv-audit-kpi-box">
+                      <span className="inv-audit-kpi-lbl">Total Inbound</span>
+                      <span className="inv-audit-kpi-num" style={{ color: '#059669' }}>
+                        +{auditModal.audit.totalInbound}
+                      </span>
+                      <span className="inv-audit-kpi-sub">PO deliveries & stock-in</span>
+                    </div>
+                    <div className="inv-audit-kpi-box">
+                      <span className="inv-audit-kpi-lbl">Total Sold</span>
+                      <span className="inv-audit-kpi-num" style={{ color: '#4f46e5' }}>
+                        -{auditModal.audit.totalSold}
+                      </span>
+                      <span className="inv-audit-kpi-sub">Customer invoices</span>
+                    </div>
+                    <div className="inv-audit-kpi-box">
+                      <span className="inv-audit-kpi-lbl">Total Damaged</span>
+                      <span className="inv-audit-kpi-num" style={{ color: '#e11d48' }}>
+                        -{auditModal.audit.totalDamaged}
+                      </span>
+                      <span className="inv-audit-kpi-sub">Written off defectives</span>
+                    </div>
+                    <div className="inv-audit-kpi-box">
+                      <span className="inv-audit-kpi-lbl">Net Adjustments</span>
+                      <span
+                        className="inv-audit-kpi-num"
+                        style={{ color: auditModal.audit.netAdjustments >= 0 ? '#059669' : '#d97706' }}
+                      >
+                        {auditModal.audit.netAdjustments >= 0 ? `+${auditModal.audit.netAdjustments}` : auditModal.audit.netAdjustments}
+                      </span>
+                      <span className="inv-audit-kpi-sub">Cycle counts & clerical</span>
+                    </div>
+                    <div className="inv-audit-kpi-box" style={{ background: '#f0fdf4', borderColor: '#bbf7d0' }}>
+                      <span className="inv-audit-kpi-lbl">Live Physical Stock</span>
+                      <span className="inv-audit-kpi-num" style={{ color: '#15803d', fontWeight: 800 }}>
+                        {auditModal.audit.currentStock}
+                      </span>
+                      <span className="inv-audit-kpi-sub">Warehouse verified</span>
+                    </div>
+                  </div>
+
+                  {/* Audit Discrepancy Status */}
+                  <div
+                    className={`inv-audit-status-banner ${
+                      auditModal.audit.auditDiscrepancy === 0 ? 'inv-status-balanced' : 'inv-status-unbalanced'
+                    }`}
+                  >
+                    {auditModal.audit.auditDiscrepancy === 0 ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <FiCheckCircle size={16} color="#059669" />
+                        <span>
+                          <strong>Forensic Reconciliation Balanced:</strong> Cumulative movement ledger balances exactly with live stock on hand (0 unit discrepancy).
+                        </span>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <FiAlertTriangle size={16} color="#d97706" />
+                        <span>
+                          <strong>Discrepancy Detected:</strong> Ledger calculation expected {auditModal.audit.expectedStock} units, but physical stock is recorded as {auditModal.audit.currentStock} units ({auditModal.audit.auditDiscrepancy > 0 ? `+${auditModal.audit.auditDiscrepancy}` : auditModal.audit.auditDiscrepancy} unit variance).
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Transaction Timeline Table for this Product */}
+                  <div style={{ marginTop: '16px' }}>
+                    <div style={{ fontWeight: 600, fontSize: '13.5px', marginBottom: '8px', color: 'var(--inv-text-title)' }}>
+                      Recent Product Transaction Ledger ({auditModal.history?.length || 0} entries)
+                    </div>
+                    <div className="inv-table-scroll" style={{ maxHeight: '240px' }}>
+                      <table className="inv-table">
+                        <thead>
+                          <tr>
+                            <th>Reference</th>
+                            <th>Type</th>
+                            <th>Change</th>
+                            <th>Reason / Reference</th>
+                            <th>Operator</th>
+                            <th>Timestamp</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {auditModal.history.length === 0 ? (
+                            <tr>
+                              <td colSpan={6} style={{ textAlign: 'center', padding: '16px', color: 'var(--inv-text-muted)' }}>
+                                No ledger transactions logged for this product.
+                              </td>
+                            </tr>
+                          ) : (
+                            auditModal.history.map((h) => {
+                              const diff = h.quantityChange || h.differential || 0;
+                              return (
+                                <tr key={h._id}>
+                                  <td>{renderRefPill(h.reference || h.trxCode)}</td>
+                                  <td>{renderVectorBadge(h.type)}</td>
+                                  <td>
+                                    <span className={`inv-diff ${diff > 0 ? 'inv-diff-pos' : diff < 0 ? 'inv-diff-neg' : 'inv-diff-neutral'}`}>
+                                      {diff > 0 ? `+${diff}` : diff}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <span style={{ fontSize: '12.5px' }}>{h.notes || h.reference || 'Movement'}</span>
+                                  </td>
+                                  <td>
+                                    <span style={{ fontSize: '12px', color: 'var(--inv-text-muted)' }}>
+                                      {h.performedBy?.name || 'Staff User'}
+                                    </span>
+                                  </td>
+                                  <td style={{ fontSize: '12px', fontVariantNumeric: 'tabular-nums' }}>
+                                    {new Date(h.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div style={{ padding: '24px', textAlign: 'center', color: 'var(--inv-text-muted)' }}>
+                  Unable to load product audit details.
+                </div>
+              )}
+            </div>
+
+            <div className="inv-modal-footer">
+              <button type="button" className="inv-btn inv-btn-secondary" onClick={closeProductAudit}>
+                Close
+              </button>
+              {auditModal.product && (
+                <>
+                  <button
+                    type="button"
+                    className="inv-btn inv-btn-secondary"
+                    onClick={() => {
+                      const pid = auditModal.product._id;
+                      closeProductAudit();
+                      openModal('adjust', pid);
+                    }}
+                  >
+                    <FiSliders size={14} />
+                    Reconcile Physical Count
+                  </button>
+                  <button
+                    type="button"
+                    className="inv-btn inv-btn-primary"
+                    onClick={() => {
+                      const pid = auditModal.product._id;
+                      closeProductAudit();
+                      openModal('in', pid);
+                    }}
+                  >
+                    <FiPlus size={14} />
+                    Restock Product
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
