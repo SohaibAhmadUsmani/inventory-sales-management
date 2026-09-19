@@ -12,6 +12,12 @@ exports.protect = async (req, res, next) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = await User.findById(decoded.id).select('-password');
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: 'Not authorized' });
+    }
+    if (!req.user.isActive) {
+      return res.status(401).json({ success: false, message: 'Account has been deactivated' });
+    }
     next();
   } catch (err) {
     return res.status(401).json({ success: false, message: 'Not authorized' });
@@ -20,7 +26,7 @@ exports.protect = async (req, res, next) => {
 
 exports.authorize = (...roles) => {
   return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
+    if (!req.user || !roles.includes(req.user.role)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     next();
