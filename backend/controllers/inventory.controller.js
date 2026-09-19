@@ -3,10 +3,75 @@ const Inventory = require('../models/Inventory');
 const Product = require('../models/Product');
 const Notification = require('../models/Notification');
 const ActivityLog = require('../models/ActivityLog');
+const { exportReportToExcel } = require('../utils/excelExport');
+const { generateReportPDF } = require('../utils/pdfExport');
 
 const generateTrxId = () => {
   const num = Math.floor(1000 + Math.random() * 9000);
   return `TRX-${num}`;
+};
+
+/**
+ * Shared query builder for Inventory Ledger endpoints (get, export-csv, export-excel, export-pdf)
+ */
+const buildInventoryQuery = async (queryObj = {}) => {
+  const { product, type, search, category, supplier, startDate, endDate } = queryObj;
+  const query = {};
+
+  if (type && type !== 'all') {
+    if (type === 'inbound') {
+      query.type = { $in: ['stock_in', 'purchase', 'opening_stock'] };
+    } else if (type === 'outbound') {
+      query.type = { $in: ['stock_out', 'sale'] };
+    } else {
+      query.type = type;
+    }
+  }
+
+  if (product) {
+    query.product = product;
+  }
+
+  if (supplier) {
+    query.supplier = supplier;
+  }
+
+  if (category) {
+    const prodsInCategory = await Product.find({ category, isActive: true }).select('_id');
+    const catProdIds = prodsInCategory.map((p) => p._id);
+    if (query.product) {
+      if (!catProdIds.some((id) => id.toString() === query.product.toString())) {
+        query.product = new mongoose.Types.ObjectId(); // Guarantee empty match if product is not in selected category
+      }
+    } else {
+      query.product = { $in: catProdIds };
+    }
+  }
+
+  if (startDate || endDate) {
+    query.createdAt = {};
+    if (startDate) query.createdAt.$gte = new Date(startDate);
+    if (endDate) query.createdAt.$lte = new Date(endDate + 'T23:59:59.999Z');
+  }
+
+  if (search && search.trim()) {
+    const matchingProducts = await Product.find({
+      $or: [
+        { name: { $regex: search.trim(), $options: 'i' } },
+        { sku: { $regex: search.trim(), $options: 'i' } },
+      ],
+    }).select('_id');
+
+    const productIds = matchingProducts.map((p) => p._id);
+
+    query.$or = [
+      { product: { $in: productIds } },
+      { reference: { $regex: search.trim(), $options: 'i' } },
+      { notes: { $regex: search.trim(), $options: 'i' } },
+    ];
+  }
+
+  return query;
 };
 
 /**
@@ -88,45 +153,8 @@ exports.getInventoryStats = async (req, res, next) => {
  */
 exports.getInventory = async (req, res, next) => {
   try {
-    const { product, type, search, startDate, endDate, page = 1, limit = 10 } = req.query;
-    const query = {};
-
-    if (type && type !== 'all') {
-      if (type === 'inbound') {
-        query.type = { $in: ['stock_in', 'purchase'] };
-      } else if (type === 'outbound') {
-        query.type = { $in: ['stock_out', 'sale'] };
-      } else {
-        query.type = type;
-      }
-    }
-
-    if (product) {
-      query.product = product;
-    }
-
-    if (startDate || endDate) {
-      query.createdAt = {};
-      if (startDate) query.createdAt.$gte = new Date(startDate);
-      if (endDate) query.createdAt.$lte = new Date(endDate + 'T23:59:59.999Z');
-    }
-
-    if (search && search.trim()) {
-      const matchingProducts = await Product.find({
-        $or: [
-          { name: { $regex: search.trim(), $options: 'i' } },
-          { sku: { $regex: search.trim(), $options: 'i' } },
-        ],
-      }).select('_id');
-
-      const productIds = matchingProducts.map((p) => p._id);
-
-      query.$or = [
-        { product: { $in: productIds } },
-        { reference: { $regex: search.trim(), $options: 'i' } },
-        { notes: { $regex: search.trim(), $options: 'i' } },
-      ];
-    }
+    const { page = 1, limit = 10 } = req.query;
+    const query = await buildInventoryQuery(req.query);
 
     const total = await Inventory.countDocuments(query);
     const records = await Inventory.find(query)
@@ -135,6 +163,7 @@ exports.getInventory = async (req, res, next) => {
         select: 'name sku image price cost stock minimumStock',
         populate: { path: 'category', select: 'name' },
       })
+      .populate('supplier', 'name company phone')
       .populate('performedBy', 'name role')
       .sort('-createdAt')
       .skip((Number(page) - 1) * Number(limit))
@@ -148,10 +177,11 @@ exports.getInventory = async (req, res, next) => {
       } else if (doc.type === 'adjustment') {
         differential = doc.currentStock - doc.previousStock;
       } else {
+        // stock_in, purchase, opening_stock
         differential = Math.abs(doc.quantity);
       }
 
-      const refCode = doc.reference && doc.reference.startsWith('TRX-')
+      const refCode = doc.reference && doc.reference.trim()
         ? doc.reference
         : `TRX-${doc._id.toString().slice(-4).toUpperCase()}`;
 
@@ -275,43 +305,16 @@ exports.getLowStockAlerts = async (req, res, next) => {
  */
 exports.exportLedgerCsv = async (req, res, next) => {
   try {
-    const { type, search, startDate, endDate } = req.query;
-    const query = {};
-
-    if (type && type !== 'all') {
-      if (type === 'inbound') query.type = { $in: ['stock_in', 'purchase'] };
-      else if (type === 'outbound') query.type = { $in: ['stock_out', 'sale'] };
-      else query.type = type;
-    }
-
-    if (startDate || endDate) {
-      query.createdAt = {};
-      if (startDate) query.createdAt.$gte = new Date(startDate);
-      if (endDate) query.createdAt.$lte = new Date(endDate + 'T23:59:59.999Z');
-    }
-
-    if (search && search.trim()) {
-      const matchingProducts = await Product.find({
-        $or: [
-          { name: { $regex: search.trim(), $options: 'i' } },
-          { sku: { $regex: search.trim(), $options: 'i' } },
-        ],
-      }).select('_id');
-      const productIds = matchingProducts.map((p) => p._id);
-      query.$or = [
-        { product: { $in: productIds } },
-        { reference: { $regex: search.trim(), $options: 'i' } },
-        { notes: { $regex: search.trim(), $options: 'i' } },
-      ];
-    }
+    const query = await buildInventoryQuery(req.query);
 
     const records = await Inventory.find(query)
       .populate('product', 'name sku')
+      .populate('supplier', 'name company')
       .populate('performedBy', 'name')
       .sort('-createdAt')
-      .limit(1000);
+      .limit(2000);
 
-    const headers = ['Reference ID,Date & Time,Product Name,SKU,Vector Type,Quantity Change,Previous Stock,Current Stock,Reason / Note,Authorized By\n'];
+    const headers = ['Reference ID,Date & Time,Product Name,SKU,Vector Type,Quantity Change,Previous Stock,Current Stock,Reason / Note,Supplier,Authorized By\n'];
     const rows = records.map((r) => {
       let diff = r.quantity;
       if (['stock_out', 'damaged', 'sale'].includes(r.type)) diff = -Math.abs(r.quantity);
@@ -323,9 +326,10 @@ exports.exportLedgerCsv = async (req, res, next) => {
       const prodName = `"${(r.product?.name || 'N/A').replace(/"/g, '""')}"`;
       const sku = `"${(r.product?.sku || 'N/A').replace(/"/g, '""')}"`;
       const notes = `"${(r.notes || r.reference || '').replace(/"/g, '""')}"`;
+      const supplierStr = `"${(r.supplier?.name ? `${r.supplier.name} (${r.supplier.company || ''})` : '').replace(/"/g, '""')}"`;
       const userName = `"${(r.performedBy?.name || 'System').replace(/"/g, '""')}"`;
 
-      return `${ref},${dateStr},${prodName},${sku},${r.type},${diff > 0 ? '+' + diff : diff},${r.previousStock},${r.currentStock},${notes},${userName}\n`;
+      return `${ref},${dateStr},${prodName},${sku},${r.type},${diff > 0 ? '+' + diff : diff},${r.previousStock},${r.currentStock},${notes},${supplierStr},${userName}\n`;
     });
 
     res.setHeader('Content-Type', 'text/csv');
@@ -337,12 +341,138 @@ exports.exportLedgerCsv = async (req, res, next) => {
 };
 
 /**
+ * GET /api/inventory/export-excel
+ * Exports movement logs as downloadable formatted .xlsx workbook
+ */
+exports.exportInventoryExcel = async (req, res, next) => {
+  try {
+    const query = await buildInventoryQuery(req.query);
+
+    const records = await Inventory.find(query)
+      .populate({
+        path: 'product',
+        select: 'name sku',
+        populate: { path: 'category', select: 'name' },
+      })
+      .populate('supplier', 'name company')
+      .populate('performedBy', 'name')
+      .sort('-createdAt')
+      .limit(2000);
+
+    const rows = records.map((r) => {
+      let diff = r.quantity;
+      if (['stock_out', 'damaged', 'sale'].includes(r.type)) diff = -Math.abs(r.quantity);
+      else if (r.type === 'adjustment') diff = r.currentStock - r.previousStock;
+      else diff = Math.abs(r.quantity);
+
+      const ref = r.reference || `TRX-${r._id.toString().slice(-4).toUpperCase()}`;
+      const dateStr = new Date(r.createdAt).toISOString().replace('T', ' ').slice(0, 19);
+
+      return {
+        'Reference ID': ref,
+        'Date & Time': dateStr,
+        'Product Name': r.product?.name || 'N/A',
+        'SKU': r.product?.sku || 'N/A',
+        'Category': r.product?.category?.name || 'General',
+        'Vector': r.type.toUpperCase(),
+        'Quantity Delta': diff > 0 ? `+${diff}` : diff,
+        'Previous Stock': r.previousStock,
+        'Current Stock': r.currentStock,
+        'Notes / Reference': r.notes || r.reference || '',
+        'Supplier': r.supplier?.name ? `${r.supplier.name} (${r.supplier.company || ''})` : '-',
+        'Authorized By': r.performedBy?.name || 'System',
+      };
+    });
+
+    const totals = {
+      'Reference ID': 'TOTAL RECORDS',
+      'Date & Time': `${records.length} movements`,
+      'Product Name': '',
+      'SKU': '',
+      'Category': '',
+      'Vector': '',
+      'Quantity Delta': '',
+      'Previous Stock': '',
+      'Current Stock': '',
+      'Notes / Reference': '',
+      'Supplier': '',
+      'Authorized By': '',
+    };
+
+    exportReportToExcel(res, {
+      rows,
+      totals,
+      sheetName: 'Movement Ledger',
+      filename: `Inventory_Ledger_${Date.now()}`,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /api/inventory/export-pdf
+ * Exports movement logs as downloadable formatted PDF audit report
+ */
+exports.exportInventoryPdf = async (req, res, next) => {
+  try {
+    const query = await buildInventoryQuery(req.query);
+
+    const records = await Inventory.find(query)
+      .populate('product', 'name sku')
+      .populate('performedBy', 'name')
+      .sort('-createdAt')
+      .limit(300);
+
+    const headers = ['Ref ID', 'Date', 'Product', 'SKU', 'Type', 'Change', 'Balance', 'Authorized By'];
+    const rows = records.map((r) => {
+      let diff = r.quantity;
+      if (['stock_out', 'damaged', 'sale'].includes(r.type)) diff = -Math.abs(r.quantity);
+      else if (r.type === 'adjustment') diff = r.currentStock - r.previousStock;
+      else diff = Math.abs(r.quantity);
+
+      const ref = r.reference ? r.reference.slice(0, 14) : `TRX-${r._id.toString().slice(-4).toUpperCase()}`;
+      const dateStr = new Date(r.createdAt).toLocaleDateString();
+      const prodName = (r.product?.name || 'N/A').slice(0, 20);
+      const sku = r.product?.sku || 'N/A';
+      const staff = r.performedBy?.name ? r.performedBy.name.slice(0, 15) : 'Staff';
+
+      return [
+        ref,
+        dateStr,
+        prodName,
+        sku,
+        r.type,
+        diff > 0 ? `+${diff}` : String(diff),
+        String(r.currentStock),
+        staff,
+      ];
+    });
+
+    const totals = ['TOTAL', `${records.length} movements`, '', '', '', '', '', ''];
+
+    await generateReportPDF(
+      {
+        title: 'Inventory Forensic Movement Audit Report',
+        dateRange: `Generated on ${new Date().toLocaleDateString()}`,
+        headers,
+        rows,
+        totals,
+      },
+      res
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
  * POST /api/inventory/stock-in
  * Manual stock intake with atomic increment and humanized activity logging
  */
 exports.stockIn = async (req, res, next) => {
   try {
-    const { productId, quantity, reference, notes } = req.body;
+    const { productId, quantity, reference, notes, supplierId } = req.body;
     const qty = Number(quantity);
     if (!qty || qty <= 0) {
       return res.status(400).json({ success: false, message: 'Quantity must be a positive integer greater than zero.' });
@@ -364,6 +494,7 @@ exports.stockIn = async (req, res, next) => {
 
     const record = await Inventory.create({
       product: productId,
+      supplier: supplierId || null,
       type: 'stock_in',
       quantity: qty,
       previousStock,
@@ -550,7 +681,7 @@ exports.damagedStock = async (req, res, next) => {
 
 /**
  * POST /api/inventory/adjust
- * Physical cycle count reconciliation with differential tracking
+ * Physical cycle count reconciliation with atomic concurrency protection
  */
 exports.adjustStock = async (req, res, next) => {
   try {
@@ -561,16 +692,19 @@ exports.adjustStock = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Counted physical stock must be a non-negative number.' });
     }
 
-    const existingProduct = await Product.findById(productId);
-    if (!existingProduct) {
+    // Atomic update returning the product state BEFORE update to reliably capture previousStock
+    const beforeProduct = await Product.findByIdAndUpdate(
+      productId,
+      { $set: { stock: countedQty } },
+      { new: false }
+    );
+
+    if (!beforeProduct) {
       return res.status(404).json({ success: false, message: 'Product not found.' });
     }
 
-    const previousStock = existingProduct.stock;
+    const previousStock = beforeProduct.stock;
     const diff = countedQty - previousStock;
-
-    existingProduct.stock = countedQty;
-    await existingProduct.save();
 
     const trxId = generateTrxId();
     const rationale = reason ? `${reason}${notes ? ` - ${notes}` : ''}` : notes || 'Cycle count reconciliation';
@@ -586,11 +720,11 @@ exports.adjustStock = async (req, res, next) => {
       performedBy: req.user.id,
     });
 
-    if (countedQty <= existingProduct.minimumStock) {
+    if (countedQty <= beforeProduct.minimumStock) {
       await Notification.create({
         type: 'low_stock',
         title: 'Low Stock Alert',
-        message: `${existingProduct.name} is low in stock (${countedQty} units remaining) after count adjustment.`,
+        message: `${beforeProduct.name} is low in stock (${countedQty} units remaining) after count adjustment.`,
       });
     }
 
@@ -600,14 +734,16 @@ exports.adjustStock = async (req, res, next) => {
       action: 'Stock Adjustment',
       entity: 'Inventory',
       entityId: record._id,
-      details: `${userDisplayName} reconciled ${existingProduct.name} (${existingProduct.sku}) from ${previousStock} to ${countedQty} (${diff >= 0 ? '+' : ''}${diff} diff). Reason: ${rationale}.`,
+      details: `${userDisplayName} reconciled ${beforeProduct.name} (${beforeProduct.sku}) from ${previousStock} to ${countedQty} (${diff >= 0 ? '+' : ''}${diff} diff). Reason: ${rationale}.`,
     });
+
+    const updatedProduct = await Product.findById(productId);
 
     res.status(201).json({
       success: true,
-      message: `Reconciled ${existingProduct.name} stock: ${previousStock} → ${countedQty} (${diff >= 0 ? '+' : ''}${diff} diff).`,
+      message: `Reconciled ${beforeProduct.name} stock: ${previousStock} → ${countedQty} (${diff >= 0 ? '+' : ''}${diff} diff).`,
       record,
-      product: existingProduct,
+      product: updatedProduct,
       diff,
     });
   } catch (err) {
@@ -617,20 +753,86 @@ exports.adjustStock = async (req, res, next) => {
 
 /**
  * GET /api/inventory/product/:productId
- * Product-specific movement history
+ * Product-specific movement history and 6-metric forensic breakdown matching Section 4 exemplar
  */
 exports.getStockByProduct = async (req, res, next) => {
   try {
-    const product = await Product.findById(req.params.productId).populate('category', 'name');
+    const product = await Product.findById(req.params.productId)
+      .populate('category', 'name')
+      .populate('supplier', 'name company');
+
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found.' });
     }
 
     const history = await Inventory.find({ product: req.params.productId })
       .populate('performedBy', 'name role')
+      .populate('supplier', 'name company')
       .sort('-createdAt');
 
-    res.json({ success: true, product, history });
+    // Aggregate forensic audit values strictly matching Section 4 exemplar
+    let openingStock = 0;
+    let totalInbound = 0;
+    let totalSold = 0;
+    let totalDamaged = 0;
+    let totalAdjustments = 0;
+
+    for (const record of history) {
+      if (record.type === 'opening_stock') {
+        openingStock += record.quantity;
+      } else if (record.type === 'stock_in' || record.type === 'purchase') {
+        totalInbound += record.quantity;
+      } else if (record.type === 'sale' || record.type === 'stock_out') {
+        totalSold += record.quantity;
+      } else if (record.type === 'damaged') {
+        totalDamaged += record.quantity;
+      } else if (record.type === 'adjustment') {
+        totalAdjustments += (record.currentStock - record.previousStock);
+      }
+    }
+
+    res.json({
+      success: true,
+      product,
+      audit: {
+        openingStock,
+        totalInbound,
+        totalSold,
+        totalDamaged,
+        totalAdjustments,
+        currentStock: product.stock,
+        minimumStock: product.minimumStock,
+        valuationCost: Math.round(product.stock * product.cost * 100) / 100,
+        valuationRetail: Math.round(product.stock * product.price * 100) / 100,
+      },
+      history,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/inventory/batch-check-low-stock
+ * Evaluates all active catalog items and dispatches consolidated system notification
+ */
+exports.batchCheckLowStock = async (req, res, next) => {
+  try {
+    const lowStockProducts = await Product.find({
+      isActive: true,
+      $expr: { $lte: ['$stock', '$minimumStock'] },
+    }).select('name stock minimumStock');
+
+    const count = lowStockProducts.length;
+    if (count > 0) {
+      await Notification.create({
+        type: 'low_stock',
+        title: 'System Threshold Alert',
+        message: `${count} products are currently below minimum stock threshold.`,
+      });
+    }
+
+    res.json({ success: true, count, products: lowStockProducts });
   } catch (err) {
     next(err);
   }

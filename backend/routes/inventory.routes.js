@@ -5,6 +5,9 @@ const {
   getCurrentStock,
   getLowStockAlerts,
   exportLedgerCsv,
+  exportInventoryExcel,
+  exportInventoryPdf,
+  batchCheckLowStock,
   stockIn,
   stockOut,
   damagedStock,
@@ -19,6 +22,9 @@ router.get('/stats', getInventoryStats);
 router.get('/current-stock', getCurrentStock);
 router.get('/low-stock', getLowStockAlerts);
 router.get('/export-csv', exportLedgerCsv);
+router.get('/export-excel', exportInventoryExcel);
+router.get('/export-pdf', exportInventoryPdf);
+router.post('/batch-check-alerts', batchCheckLowStock);
 router.get('/', getInventory);
 
 router.post('/stock-in', authorize('admin', 'staff'), stockIn);

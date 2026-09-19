@@ -1,4 +1,5 @@
 const Product = require('../models/Product');
+const Inventory = require('../models/Inventory');
 const ActivityLog = require('../models/ActivityLog');
 const Notification = require('../models/Notification');
 
@@ -40,6 +41,21 @@ exports.createProduct = async (req, res, next) => {
   try {
     if (req.file) req.body.image = req.file.path;
     const product = await Product.create(req.body);
+
+    if (product.stock > 0) {
+      await Inventory.create({
+        product: product._id,
+        supplier: product.supplier || null,
+        type: 'opening_stock',
+        quantity: product.stock,
+        previousStock: 0,
+        currentStock: product.stock,
+        reference: `OPN-${product.sku}`,
+        notes: 'Initial opening stock balance',
+        performedBy: req.user.id,
+      });
+    }
+
     if (product.stock <= product.minimumStock) {
       await Notification.create({ type: 'low_stock', title: 'Low Stock Alert', message: `${product.name} is low in stock (${product.stock} remaining)` });
     }
