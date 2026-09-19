@@ -1,19 +1,21 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
-import { FiBox, FiMail, FiLock, FiEye, FiEyeOff, FiAlertCircle } from 'react-icons/fi';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import api from '../services/api';
+import { toast } from 'react-toastify';
+import { FiBox, FiLock, FiEye, FiEyeOff, FiArrowLeft, FiAlertCircle, FiCheckCircle } from 'react-icons/fi';
 import loginBg from '../assets/login background.mp4';
 import './Auth.css';
 
-export default function Login() {
-  const [email, setEmail] = useState('');
+export default function ResetPassword() {
+  const { token } = useParams();
+  const navigate = useNavigate();
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const videoRef = useRef(null);
-  const { login } = useAuth();
-  const navigate = useNavigate();
 
   useEffect(() => {
     if (videoRef.current) {
@@ -24,12 +26,21 @@ export default function Login() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    if (password !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters');
+      return;
+    }
     setLoading(true);
     try {
-      await login(email, password);
-      navigate('/');
+      await api.post(`/auth/reset-password/${token}`, { password });
+      toast.success('Password reset successful. You can now log in.');
+      navigate('/login');
     } catch (err) {
-      setError(err.response?.data?.message || 'Login failed. Please try again.');
+      setError(err.response?.data?.message || 'Password reset failed. The link may have expired.');
     } finally {
       setLoading(false);
     }
@@ -59,24 +70,20 @@ export default function Login() {
             InventoryHub
           </div>
           <div className="auth-branding-sub">
-            Streamline your inventory, sales, and purchasing operations with a unified management platform.
+            Create a strong new password for your account to regain access.
           </div>
           <div className="auth-branding-features">
             <div className="auth-feature-item">
               <span className="auth-feature-dot" />
-              Real-time inventory tracking
+              Minimum 6 characters required
             </div>
             <div className="auth-feature-item">
               <span className="auth-feature-dot" />
-              Sales analytics and reporting
+              Use a mix of letters and numbers
             </div>
             <div className="auth-feature-item">
               <span className="auth-feature-dot" />
-              Role-based access control
-            </div>
-            <div className="auth-feature-item">
-              <span className="auth-feature-dot" />
-              Supplier and purchase management
+              Avoid common passwords
             </div>
           </div>
         </div>
@@ -85,10 +92,10 @@ export default function Login() {
         <div className="auth-card">
           <div className="auth-card-header">
             <div className="auth-card-logo">
-              <FiBox size={22} />
+              <FiLock size={22} />
             </div>
-            <h1 className="auth-card-title">Welcome back</h1>
-            <p className="auth-card-subtitle">Sign in to your account</p>
+            <h1 className="auth-card-title">Reset password</h1>
+            <p className="auth-card-subtitle">Enter your new password below</p>
           </div>
 
           <form className="auth-form" onSubmit={handleSubmit}>
@@ -102,39 +109,21 @@ export default function Login() {
             )}
 
             <div className="auth-input-group">
-              <label className="auth-input-label" htmlFor="login-email">Email</label>
-              <div className="auth-input-wrap">
-                <span className="auth-input-icon">
-                  <FiMail size={16} />
-                </span>
-                <input
-                  id="login-email"
-                  className="auth-input"
-                  type="email"
-                  placeholder="you@company.com"
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                  required
-                  autoComplete="email"
-                />
-              </div>
-            </div>
-
-            <div className="auth-input-group">
-              <label className="auth-input-label" htmlFor="login-password">Password</label>
+              <label className="auth-input-label" htmlFor="reset-password">New Password</label>
               <div className="auth-input-wrap">
                 <span className="auth-input-icon">
                   <FiLock size={16} />
                 </span>
                 <input
-                  id="login-password"
+                  id="reset-password"
                   className="auth-input"
                   type={showPassword ? 'text' : 'password'}
-                  placeholder="Enter your password"
+                  placeholder="Enter new password"
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   required
-                  autoComplete="current-password"
+                  minLength={6}
+                  autoComplete="new-password"
                   style={{ paddingRight: 44 }}
                 />
                 <button
@@ -149,6 +138,36 @@ export default function Login() {
               </div>
             </div>
 
+            <div className="auth-input-group">
+              <label className="auth-input-label" htmlFor="reset-confirm">Confirm Password</label>
+              <div className="auth-input-wrap">
+                <span className="auth-input-icon">
+                  <FiLock size={16} />
+                </span>
+                <input
+                  id="reset-confirm"
+                  className="auth-input"
+                  type={showConfirm ? 'text' : 'password'}
+                  placeholder="Confirm new password"
+                  value={confirmPassword}
+                  onChange={e => setConfirmPassword(e.target.value)}
+                  required
+                  minLength={6}
+                  autoComplete="new-password"
+                  style={{ paddingRight: 44 }}
+                />
+                <button
+                  type="button"
+                  className="auth-eye-btn"
+                  onClick={() => setShowConfirm(!showConfirm)}
+                  tabIndex={-1}
+                  aria-label={showConfirm ? 'Hide password' : 'Show password'}
+                >
+                  {showConfirm ? <FiEyeOff size={16} /> : <FiEye size={16} />}
+                </button>
+              </div>
+            </div>
+
             <button
               className="auth-btn"
               type="submit"
@@ -157,22 +176,19 @@ export default function Login() {
               {loading ? (
                 <span className="auth-btn-loading">
                   <span className="auth-spinner" />
-                  Signing in...
+                  Resetting...
                 </span>
               ) : (
-                'Sign In'
+                'Reset Password'
               )}
             </button>
-
-            <div className="auth-back-link">
-              <Link to="/forgot-password">Forgot password?</Link>
-            </div>
           </form>
 
-          <div className="auth-footer">
-            <p className="auth-footer-text">
-              Admin & Staff Access Only
-            </p>
+          <div className="auth-back-link" style={{ marginTop: 20 }}>
+            <Link to="/login">
+              <FiArrowLeft size={14} style={{ marginRight: 6, verticalAlign: 'middle' }} />
+              Back to Sign In
+            </Link>
           </div>
         </div>
       </div>
