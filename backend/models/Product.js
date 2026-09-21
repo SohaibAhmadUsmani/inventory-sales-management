@@ -18,6 +18,11 @@ productSchema.virtual('isLowStock').get(function () {
   return this.stock <= this.minimumStock;
 });
 
+productSchema.index({ name: 'text', sku: 'text' });
+productSchema.index({ category: 1, isActive: 1 });
+productSchema.index({ supplier: 1, isActive: 1 });
+productSchema.index({ stock: 1, minimumStock: 1 });
+
 productSchema.set('toJSON', { virtuals: true });
 
 module.exports = mongoose.model('Product', productSchema);

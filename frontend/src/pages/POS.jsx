@@ -153,6 +153,7 @@ export default function POS() {
       setCart([]);
       setDiscount(0);
       setTax(0);
+      loadProducts(search);
     } catch (err) {
       toast.error(err.response?.data?.message || 'Sale failed');
     } finally {

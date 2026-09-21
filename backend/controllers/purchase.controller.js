@@ -26,6 +26,21 @@ const applyPurchaseStockIncrease = async (purchase, userId) => {
     }
 
     const previousStock = product.stock;
+    const itemCost = Number(item.cost);
+    const itemQty = Number(item.quantity);
+
+    // Recalculate Weighted Average Cost (AVCO)
+    if (Number.isFinite(itemCost) && itemCost > 0) {
+      if (previousStock <= 0) {
+        product.cost = Math.round(itemCost * 100) / 100;
+      } else {
+        const currentTotalCost = previousStock * (product.cost || 0);
+        const inboundTotalCost = itemQty * itemCost;
+        const newAverageCost = (currentTotalCost + inboundTotalCost) / (previousStock + itemQty);
+        product.cost = Math.round(newAverageCost * 100) / 100;
+      }
+    }
+
     product.stock += item.quantity;
     await product.save();
 
@@ -34,6 +49,7 @@ const applyPurchaseStockIncrease = async (purchase, userId) => {
       supplier: purchase.supplier || null,
       type: 'purchase',
       quantity: item.quantity,
+      unitCost: itemCost > 0 ? itemCost : (product.cost || 0),
       previousStock,
       currentStock: product.stock,
       reference: purchase.orderNumber,
@@ -157,8 +173,8 @@ exports.createPurchase = async (req, res, next) => {
     }
 
     await Notification.create({
-      type: 'purchase_received',
-      title: 'Purchase Order Created',
+      type: normalizedStatus === 'received' ? 'purchase_received' : 'purchase_ordered',
+      title: normalizedStatus === 'received' ? 'Purchase Received' : 'Purchase Order Created',
       message: `Purchase order ${purchase.orderNumber} created for $${totalCost.toFixed(2)}`,
     });
 
@@ -194,6 +210,10 @@ exports.updatePurchaseStatus = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'A received purchase cannot be cancelled or reverted' });
     }
 
+    if (purchase.status === 'cancelled' && nextStatus !== 'cancelled') {
+      return res.status(400).json({ success: false, message: 'A cancelled purchase order cannot be reopened or received' });
+    }
+
     const statusChangedToReceived = nextStatus === 'received' && purchase.status !== 'received' && !purchase.inventoryApplied;
 
     if (statusChangedToReceived) {
@@ -214,11 +234,13 @@ exports.updatePurchaseStatus = async (req, res, next) => {
 
     await purchase.save();
 
-    await Notification.create({
-      type: 'purchase_received',
-      title: 'Purchase Received',
-      message: `Purchase order ${purchase.orderNumber} marked as received`,
-    });
+    if (statusChangedToReceived) {
+      await Notification.create({
+        type: 'purchase_received',
+        title: 'Purchase Received',
+        message: `Purchase order ${purchase.orderNumber} marked as received`,
+      });
+    }
 
     await ActivityLog.create({
       user: req.user.id,

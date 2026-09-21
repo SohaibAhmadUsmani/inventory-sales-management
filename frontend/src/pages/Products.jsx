@@ -282,8 +282,19 @@ export default function Products() {
                   <input type="number" step="0.01" min="0" value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} required />
                 </div>
                 <div className="form-group">
-                  <label>Stock</label>
-                  <input type="number" min="0" value={form.stock} onChange={e => setForm({ ...form, stock: e.target.value })} required />
+                  <label>
+                    Stock {editingId && <span style={{ fontSize: 11, color: 'var(--text-light)', fontWeight: 400 }}>(Adjust via Inventory ledger)</span>}
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={form.stock}
+                    onChange={e => setForm({ ...form, stock: e.target.value })}
+                    disabled={Boolean(editingId)}
+                    title={editingId ? 'Direct stock edits are locked to preserve audit trail integrity. Use Inventory Movements or Stock Adjustment.' : ''}
+                    style={editingId ? { opacity: 0.7, cursor: 'not-allowed', background: 'var(--bg)' } : {}}
+                    required={!editingId}
+                  />
                 </div>
                 <div className="form-group">
                   <label>Minimum Stock</label>
