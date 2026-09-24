@@ -13,6 +13,7 @@ const {
   damagedStock,
   adjustStock,
   getStockByProduct,
+  createDraftPoFromLowStock,
 } = require('../controllers/inventory.controller');
 const { protect, authorize } = require('../middleware/auth');
 
@@ -31,6 +32,7 @@ router.post('/stock-in', authorize('admin', 'staff'), stockIn);
 router.post('/stock-out', authorize('admin', 'staff'), stockOut);
 router.post('/damaged', authorize('admin', 'staff'), damagedStock);
 router.post('/adjust', authorize('admin', 'staff'), adjustStock);
+router.post('/create-draft-po', authorize('admin', 'staff'), createDraftPoFromLowStock);
 
 router.get('/product/:productId', getStockByProduct);
 

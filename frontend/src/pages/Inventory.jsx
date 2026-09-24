@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import useDebounce from '../hooks/useDebounce';
 import api from '../services/api';
 import { toast } from 'react-toastify';
 import {
@@ -58,6 +59,7 @@ export default function Inventory() {
 
   // Filters
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 350);
   const [typeFilter, setTypeFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
   const [customStartDate, setCustomStartDate] = useState('');
@@ -66,10 +68,14 @@ export default function Inventory() {
   const [supplierFilter, setSupplierFilter] = useState('');
   const [catalogStatusFilter, setCatalogStatusFilter] = useState('all');
 
-  // Critical Alerts & Catalog
+  // Critical Alerts & Catalog State
   const [criticalAlerts, setCriticalAlerts] = useState([]);
   const [currentStockList, setCurrentStockList] = useState([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [catalogTotalPages, setCatalogTotalPages] = useState(1);
+  const [catalogTotalEntries, setCatalogTotalEntries] = useState(0);
+  const [generatingPo, setGeneratingPo] = useState(false);
 
   // Real Data: Suppliers, Products, and Categories
   const [productsList, setProductsList] = useState([]);
@@ -83,6 +89,7 @@ export default function Inventory() {
     supplierId: '',
     quantity: '',
     newQuantity: '',
+    unitCost: '',
     reason: '',
     reference: '',
     notes: '',
@@ -143,7 +150,7 @@ export default function Inventory() {
       params: {
         page,
         limit: 10,
-        search: search.trim() || undefined,
+        search: debouncedSearch.trim() || undefined,
         type: typeFilter !== 'all' ? typeFilter : undefined,
         category: categoryFilter || undefined,
         supplier: supplierFilter || undefined,
@@ -159,7 +166,7 @@ export default function Inventory() {
         toast.error(err.response?.data?.message || 'Failed to load movement logs');
       })
       .finally(() => setLoading(false));
-  }, [page, search, typeFilter, categoryFilter, supplierFilter, getDateRangeParams]);
+  }, [page, debouncedSearch, typeFilter, categoryFilter, supplierFilter, getDateRangeParams]);
 
   // Fetch Critical Low Stock Items
   const fetchLowStockAlerts = useCallback(() => {
@@ -168,21 +175,26 @@ export default function Inventory() {
       .catch(console.error);
   }, []);
 
-  // Fetch Current Stock Catalog
+  // Fetch Current Stock Catalog with pagination
   const fetchCurrentStock = useCallback(() => {
     setCatalogLoading(true);
     api.get('/inventory/current-stock', {
       params: {
-        search: search.trim() || undefined,
+        search: debouncedSearch.trim() || undefined,
         category: categoryFilter || undefined,
         status: catalogStatusFilter !== 'all' ? catalogStatusFilter : undefined,
-        limit: 100,
+        page: catalogPage,
+        limit: 25,
       },
     })
-      .then((res) => setCurrentStockList(res.data?.products || []))
+      .then((res) => {
+        setCurrentStockList(res.data?.products || []);
+        setCatalogTotalPages(res.data?.totalPages || 1);
+        setCatalogTotalEntries(res.data?.total || 0);
+      })
       .catch(console.error)
       .finally(() => setCatalogLoading(false));
-  }, [search, categoryFilter, catalogStatusFilter]);
+  }, [debouncedSearch, categoryFilter, catalogStatusFilter, catalogPage]);
 
   // Fetch products for modal selectors
   const fetchProductsForModal = useCallback(() => {
@@ -217,6 +229,18 @@ export default function Inventory() {
     api.post('/inventory/batch-check-alerts').catch(() => {});
   }, [fetchStats, fetchLowStockAlerts, fetchProductsForModal, fetchSuppliers, fetchCategories]);
 
+  // Escape key closes open modals
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (modalMode) closeModal();
+        if (auditModal.open) closeProductAudit();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [modalMode, auditModal.open]);
+
   // Tab synchronization
   useEffect(() => {
     if (activeTab === 'history') {
@@ -229,7 +253,8 @@ export default function Inventory() {
   // Search & filter reset page
   useEffect(() => {
     setPage(1);
-  }, [search, typeFilter, dateFilter, customStartDate, customEndDate, categoryFilter, supplierFilter]);
+    setCatalogPage(1);
+  }, [debouncedSearch, typeFilter, dateFilter, customStartDate, customEndDate, categoryFilter, supplierFilter, catalogStatusFilter]);
 
   // Selected product helper for real-time calculations in modals
   const selectedProduct = useMemo(() => {
@@ -262,16 +287,20 @@ export default function Inventory() {
     setAuditModal({ open: false, loading: false, product: null, audit: null, history: [] });
   };
 
-  // Build export query params
+  // Build clean export query params (removes undefined/null/empty strings)
   const buildExportParams = () => {
     const dateParams = getDateRangeParams();
-    return new URLSearchParams({
-      type: typeFilter,
-      search: search.trim(),
-      category: categoryFilter,
-      supplier: supplierFilter,
+    const raw = {
+      type: typeFilter !== 'all' ? typeFilter : undefined,
+      search: search.trim() || undefined,
+      category: categoryFilter || undefined,
+      supplier: supplierFilter || undefined,
       ...dateParams,
-    }).toString();
+    };
+    const cleanParams = Object.fromEntries(
+      Object.entries(raw).filter(([_, v]) => v !== undefined && v !== null && v !== '')
+    );
+    return new URLSearchParams(cleanParams).toString();
   };
 
   // Handle Export Log (CSV)
@@ -290,7 +319,17 @@ export default function Inventory() {
       link.remove();
       toast.success('Inventory ledger exported to CSV');
     } catch (err) {
-      toast.error('Failed to export inventory logs');
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const parsed = JSON.parse(text);
+          toast.error(parsed.message || 'Failed to export inventory logs');
+        } catch {
+          toast.error('Failed to export inventory logs');
+        }
+      } else {
+        toast.error(err.response?.data?.message || 'Failed to export inventory logs');
+      }
     } finally {
       setExporting(null);
     }
@@ -314,7 +353,17 @@ export default function Inventory() {
       link.remove();
       toast.success('Inventory workbook exported to Excel');
     } catch (err) {
-      toast.error('Failed to export Excel workbook');
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const parsed = JSON.parse(text);
+          toast.error(parsed.message || 'Failed to export Excel workbook');
+        } catch {
+          toast.error('Failed to export Excel workbook');
+        }
+      } else {
+        toast.error(err.response?.data?.message || 'Failed to export Excel workbook');
+      }
     } finally {
       setExporting(null);
     }
@@ -336,9 +385,34 @@ export default function Inventory() {
       link.remove();
       toast.success('Audit report exported to PDF');
     } catch (err) {
-      toast.error('Failed to export PDF report');
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const parsed = JSON.parse(text);
+          toast.error(parsed.message || 'Failed to export PDF report');
+        } catch {
+          toast.error('Failed to export PDF report');
+        }
+      } else {
+        toast.error(err.response?.data?.message || 'Failed to export PDF report');
+      }
     } finally {
       setExporting(null);
+    }
+  };
+
+  // Trigger one-click draft PO replenishment generator
+  const handleGenerateDraftPo = async () => {
+    setGeneratingPo(true);
+    try {
+      const res = await api.post('/inventory/create-draft-po');
+      toast.success(res.data?.message || 'Draft Purchase Orders generated successfully!');
+      fetchLowStockAlerts();
+      fetchStats();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to generate draft purchase orders');
+    } finally {
+      setGeneratingPo(false);
     }
   };
 
@@ -350,6 +424,7 @@ export default function Inventory() {
       supplierId: '',
       quantity: '',
       newQuantity: '',
+      unitCost: '',
       reason:
         mode === 'adjust'
           ? 'Cycle Count Variance'
@@ -363,7 +438,7 @@ export default function Inventory() {
 
   const closeModal = () => {
     setModalMode(null);
-    setForm({ productId: '', supplierId: '', quantity: '', newQuantity: '', reason: '', reference: '', notes: '' });
+    setForm({ productId: '', supplierId: '', quantity: '', newQuantity: '', unitCost: '', reason: '', reference: '', notes: '' });
   };
 
   // Submit Modal Action
@@ -373,12 +448,22 @@ export default function Inventory() {
       return toast.warning('Please select a product');
     }
 
+    // Over-dispatch prevention
+    if (['out', 'damaged'].includes(modalMode)) {
+      const qty = Number(form.quantity);
+      if (selectedProduct && qty > selectedProduct.stock) {
+        return toast.error(`Requested quantity (${qty}) exceeds available physical stock (${selectedProduct.stock} units).`);
+      }
+    }
+
     setSubmitting(true);
     try {
       if (modalMode === 'in') {
         const payload = {
           productId: form.productId,
           quantity: Number(form.quantity),
+          supplierId: form.supplierId || undefined,
+          unitCost: form.unitCost ? Number(form.unitCost) : undefined,
           reference: form.reference,
           notes: form.notes,
         };
@@ -406,6 +491,7 @@ export default function Inventory() {
         const payload = {
           productId: form.productId,
           newQuantity: Number(form.newQuantity),
+          expectedStock: selectedProduct ? selectedProduct.stock : undefined,
           reason: form.reason,
           notes: form.notes,
         };
@@ -446,18 +532,22 @@ export default function Inventory() {
         );
       case 'stock_in':
       case 'purchase':
+      case 'sale_return':
+      case 'transfer_in':
         return (
           <span className="inv-vector-badge inv-vector-inbound">
             <FiArrowDownLeft size={13} />
-            Inbound
+            {type === 'sale_return' ? 'Sale Return' : type === 'transfer_in' ? 'Transfer In' : 'Inbound'}
           </span>
         );
       case 'stock_out':
       case 'sale':
+      case 'purchase_return':
+      case 'transfer_out':
         return (
           <span className="inv-vector-badge inv-vector-outbound">
             <FiArrowUpRight size={13} />
-            Outbound
+            {type === 'purchase_return' ? 'PO Return' : type === 'transfer_out' ? 'Transfer Out' : 'Outbound'}
           </span>
         );
       case 'adjustment':
@@ -468,10 +558,11 @@ export default function Inventory() {
           </span>
         );
       case 'damaged':
+      case 'expired':
         return (
           <span className="inv-vector-badge inv-vector-damaged">
             <FiAlertTriangle size={12} />
-            Damaged
+            {type === 'expired' ? 'Expired' : 'Damaged'}
           </span>
         );
       default:
@@ -681,6 +772,7 @@ export default function Inventory() {
           {search && (
             <button
               onClick={() => setSearch('')}
+              aria-label="Clear search"
               style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--inv-text-muted)' }}
             >
               <FiX size={14} />
@@ -976,6 +1068,27 @@ export default function Inventory() {
       {/* ----------------- Tab 2: Low Stock Alerts View (Live Data) ----------------- */}
       {activeTab === 'alerts' && (
         <div className="inv-table-card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid var(--inv-border)' }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600, color: 'var(--inv-text-title)' }}>
+                Replenishment Threshold Watchlist
+              </h3>
+              <p style={{ margin: '2px 0 0 0', fontSize: '12.5px', color: 'var(--inv-text-muted)' }}>
+                {criticalAlerts.length} item{criticalAlerts.length === 1 ? '' : 's'} currently at or below minimum threshold
+              </p>
+            </div>
+            {criticalAlerts.length > 0 && (
+              <button
+                className="inv-btn inv-btn-primary inv-btn-sm"
+                onClick={handleGenerateDraftPo}
+                disabled={generatingPo}
+                title="Automatically create draft POs for all suppliers with low stock items"
+              >
+                <FiPackage size={14} />
+                {generatingPo ? 'Generating Draft POs...' : 'Generate Replenishment POs'}
+              </button>
+            )}
+          </div>
           <div className="inv-table-scroll">
             <table className="inv-table">
               <thead>
@@ -1164,6 +1277,32 @@ export default function Inventory() {
               </tbody>
             </table>
           </div>
+          {catalogTotalEntries > 25 && (
+            <div className="inv-pagination-bar">
+              <div className="inv-pagination-info">
+                Showing {(catalogPage - 1) * 25 + 1} to {Math.min(catalogPage * 25, catalogTotalEntries)} of {catalogTotalEntries} catalog products
+              </div>
+              <div className="inv-pagination">
+                <button
+                  className="inv-page-btn"
+                  disabled={catalogPage <= 1}
+                  onClick={() => setCatalogPage((p) => Math.max(1, p - 1))}
+                >
+                  <FiChevronLeft size={14} />
+                  Prev
+                </button>
+                <button className="inv-page-btn active">{catalogPage}</button>
+                <button
+                  className="inv-page-btn"
+                  disabled={catalogPage >= catalogTotalPages}
+                  onClick={() => setCatalogPage((p) => p + 1)}
+                >
+                  Next
+                  <FiChevronRight size={14} />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1255,7 +1394,7 @@ export default function Inventory() {
                 {modalMode === 'out' && <><FiMinus color="var(--inv-indigo)" /> Record Outbound Dispatch</>}
                 {modalMode === 'damaged' && <><FiAlertTriangle color="var(--inv-rose)" /> Record Damaged Goods</>}
               </div>
-              <button className="inv-modal-close" onClick={closeModal}>
+              <button className="inv-modal-close" onClick={closeModal} aria-label="Close modal">
                 <FiX />
               </button>
             </div>
@@ -1292,6 +1431,7 @@ export default function Inventory() {
                       <input
                         type="number"
                         min="0"
+                        step="1"
                         className="inv-form-input"
                         placeholder="e.g. 48"
                         value={form.newQuantity}
@@ -1347,11 +1487,27 @@ export default function Inventory() {
                       <input
                         type="number"
                         min="1"
+                        step="1"
                         className="inv-form-input"
                         placeholder="e.g. 50"
                         value={form.quantity}
                         onChange={(e) => setForm({ ...form, quantity: e.target.value })}
                         required
+                      />
+                    </div>
+
+                    <div className="inv-form-group">
+                      <label className="inv-form-label">
+                        Unit Cost ($) <span>(optional — updates Weighted Average Cost / AVCO)</span>
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        className="inv-form-input"
+                        placeholder={selectedProduct?.cost ? `Current: $${selectedProduct.cost}` : 'e.g. 15.50'}
+                        value={form.unitCost || ''}
+                        onChange={(e) => setForm({ ...form, unitCost: e.target.value })}
                       />
                     </div>
 
@@ -1415,6 +1571,7 @@ export default function Inventory() {
                       <input
                         type="number"
                         min="1"
+                        step="1"
                         max={selectedProduct ? selectedProduct.stock : undefined}
                         className="inv-form-input"
                         placeholder="e.g. 10"
@@ -1459,6 +1616,7 @@ export default function Inventory() {
                       <input
                         type="number"
                         min="1"
+                        step="1"
                         max={selectedProduct ? selectedProduct.stock : undefined}
                         className="inv-form-input"
                         placeholder="e.g. 3"
@@ -1519,7 +1677,7 @@ export default function Inventory() {
                 <FiActivity color="var(--inv-teal)" size={18} />
                 <span>Forensic Stock Audit & Movement Breakdown</span>
               </div>
-              <button className="inv-modal-close" onClick={closeProductAudit}>
+              <button className="inv-modal-close" onClick={closeProductAudit} aria-label="Close modal">
                 <FiX />
               </button>
             </div>
@@ -1637,10 +1795,10 @@ export default function Inventory() {
                   {/* Audit Discrepancy Status */}
                   <div
                     className={`inv-audit-status-banner ${
-                      auditModal.audit.auditDiscrepancy === 0 ? 'inv-status-balanced' : 'inv-status-unbalanced'
+                      (auditModal.audit.auditDiscrepancy ?? 0) === 0 ? 'inv-status-balanced' : 'inv-status-unbalanced'
                     }`}
                   >
-                    {auditModal.audit.auditDiscrepancy === 0 ? (
+                    {(auditModal.audit.auditDiscrepancy ?? 0) === 0 ? (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <FiCheckCircle size={16} color="#059669" />
                         <span>
@@ -1651,7 +1809,7 @@ export default function Inventory() {
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <FiAlertTriangle size={16} color="#d97706" />
                         <span>
-                          <strong>Discrepancy Detected:</strong> Ledger calculation expected {auditModal.audit.expectedStock} units, but physical stock is recorded as {auditModal.audit.currentStock} units ({auditModal.audit.auditDiscrepancy > 0 ? `+${auditModal.audit.auditDiscrepancy}` : auditModal.audit.auditDiscrepancy} unit variance).
+                          <strong>Discrepancy Detected:</strong> Ledger calculation expected {auditModal.audit.expectedStock ?? (auditModal.audit.openingStock + auditModal.audit.totalInbound - auditModal.audit.totalSold - auditModal.audit.totalDamaged + (auditModal.audit.netAdjustments || auditModal.audit.totalAdjustments || 0))} units, but physical stock is recorded as {auditModal.audit.currentStock} units ({auditModal.audit.auditDiscrepancy > 0 ? `+${auditModal.audit.auditDiscrepancy}` : auditModal.audit.auditDiscrepancy} unit variance).
                         </span>
                       </div>
                     )}
@@ -1683,7 +1841,15 @@ export default function Inventory() {
                             </tr>
                           ) : (
                             auditModal.history.map((h) => {
-                              const diff = h.quantityChange || h.differential || 0;
+                              const diff = h.differential !== undefined
+                                ? h.differential
+                                : h.quantityChange !== undefined
+                                ? h.quantityChange
+                                : (['stock_out', 'damaged', 'sale', 'expired', 'purchase_return', 'transfer_out'].includes(h.type)
+                                    ? -Math.abs(h.quantity)
+                                    : h.type === 'adjustment'
+                                    ? (h.currentStock - h.previousStock)
+                                    : Math.abs(h.quantity));
                               return (
                                 <tr key={h._id}>
                                   <td>{renderRefPill(h.reference || h.trxCode)}</td>

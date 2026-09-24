@@ -4,7 +4,7 @@ const notificationSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   type: {
     type: String,
-    enum: ['low_stock', 'sale_completed', 'purchase_received', 'stock_adjustment', 'info'],
+    enum: ['low_stock', 'sale_completed', 'sale_cancelled', 'purchase_received', 'purchase_ordered', 'stock_adjustment', 'info'],
     required: true,
   },
   title: { type: String, required: true },
@@ -12,5 +12,7 @@ const notificationSchema = new mongoose.Schema({
   isRead: { type: Boolean, default: false },
   referenceId: { type: mongoose.Schema.Types.ObjectId, default: null },
 }, { timestamps: true });
+
+notificationSchema.index({ user: 1, isRead: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Notification', notificationSchema);

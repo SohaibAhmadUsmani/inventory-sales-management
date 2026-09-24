@@ -6,9 +6,14 @@ const ActivityLog = require('../models/ActivityLog');
 const { exportReportToExcel } = require('../utils/excelExport');
 const { generateReportPDF } = require('../utils/pdfExport');
 
-const generateTrxId = () => {
-  const num = Math.floor(1000 + Math.random() * 9000);
-  return `TRX-${num}`;
+const escapeRegex = (string) => {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+const generateTrxId = (prefix = 'TRX') => {
+  const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
+  const ts = Date.now().toString().slice(-4);
+  return `${prefix}-${ts}-${rand}`;
 };
 
 /**
@@ -20,24 +25,24 @@ const buildInventoryQuery = async (queryObj = {}) => {
 
   if (type && type !== 'all') {
     if (type === 'inbound') {
-      query.type = { $in: ['stock_in', 'purchase', 'opening_stock'] };
+      query.type = { $in: ['stock_in', 'purchase', 'opening_stock', 'sale_return', 'transfer_in'] };
     } else if (type === 'outbound') {
-      query.type = { $in: ['stock_out', 'sale'] };
+      query.type = { $in: ['stock_out', 'sale', 'damaged', 'expired', 'purchase_return', 'transfer_out'] };
     } else {
       query.type = type;
     }
   }
 
-  if (product) {
+  if (product && mongoose.Types.ObjectId.isValid(product)) {
     query.product = product;
   }
 
-  if (supplier) {
+  if (supplier && mongoose.Types.ObjectId.isValid(supplier)) {
     query.supplier = supplier;
   }
 
-  if (category) {
-    const prodsInCategory = await Product.find({ category, isActive: true }).select('_id');
+  if (category && mongoose.Types.ObjectId.isValid(category)) {
+    const prodsInCategory = await Product.find({ category }).select('_id');
     const catProdIds = prodsInCategory.map((p) => p._id);
     if (query.product) {
       if (!catProdIds.some((id) => id.toString() === query.product.toString())) {
@@ -49,16 +54,28 @@ const buildInventoryQuery = async (queryObj = {}) => {
   }
 
   if (startDate || endDate) {
-    query.createdAt = {};
-    if (startDate) query.createdAt.$gte = new Date(startDate);
-    if (endDate) query.createdAt.$lte = new Date(endDate + 'T23:59:59.999Z');
+    if (startDate && startDate !== 'undefined' && startDate !== 'null') {
+      const sDate = new Date(startDate);
+      if (!isNaN(sDate.getTime())) {
+        query.createdAt = query.createdAt || {};
+        query.createdAt.$gte = sDate;
+      }
+    }
+    if (endDate && endDate !== 'undefined' && endDate !== 'null') {
+      const eDate = new Date(endDate + 'T23:59:59.999Z');
+      if (!isNaN(eDate.getTime())) {
+        query.createdAt = query.createdAt || {};
+        query.createdAt.$lte = eDate;
+      }
+    }
   }
 
-  if (search && search.trim()) {
+  if (search && typeof search === 'string' && search.trim()) {
+    const sanitizedSearch = escapeRegex(search.trim());
     const matchingProducts = await Product.find({
       $or: [
-        { name: { $regex: search.trim(), $options: 'i' } },
-        { sku: { $regex: search.trim(), $options: 'i' } },
+        { name: { $regex: sanitizedSearch, $options: 'i' } },
+        { sku: { $regex: sanitizedSearch, $options: 'i' } },
       ],
     }).select('_id');
 
@@ -66,8 +83,8 @@ const buildInventoryQuery = async (queryObj = {}) => {
 
     query.$or = [
       { product: { $in: productIds } },
-      { reference: { $regex: search.trim(), $options: 'i' } },
-      { notes: { $regex: search.trim(), $options: 'i' } },
+      { reference: { $regex: sanitizedSearch, $options: 'i' } },
+      { notes: { $regex: sanitizedSearch, $options: 'i' } },
     ];
   }
 
@@ -172,12 +189,12 @@ exports.getInventory = async (req, res, next) => {
     const formattedRecords = records.map((r) => {
       const doc = r.toObject();
       let differential = doc.quantity;
-      if (['stock_out', 'damaged', 'sale'].includes(doc.type)) {
+      if (['stock_out', 'damaged', 'sale', 'expired', 'purchase_return', 'transfer_out'].includes(doc.type)) {
         differential = -Math.abs(doc.quantity);
       } else if (doc.type === 'adjustment') {
         differential = doc.currentStock - doc.previousStock;
       } else {
-        // stock_in, purchase, opening_stock
+        // stock_in, purchase, opening_stock, sale_return, transfer_in
         differential = Math.abs(doc.quantity);
       }
 
@@ -188,6 +205,7 @@ exports.getInventory = async (req, res, next) => {
       return {
         ...doc,
         differential,
+        quantityChange: differential,
         trxCode: refCode,
         status: 'completed',
       };
@@ -299,6 +317,15 @@ exports.getLowStockAlerts = async (req, res, next) => {
   }
 };
 
+const sanitizeCsvCell = (val) => {
+  if (val === null || val === undefined) return '""';
+  let str = String(val).replace(/"/g, '""');
+  if (/^[=+@\-|\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
+  return `"${str}"`;
+};
+
 /**
  * GET /api/inventory/export-csv
  * Exports movement logs as downloadable CSV
@@ -317,17 +344,17 @@ exports.exportLedgerCsv = async (req, res, next) => {
     const headers = ['Reference ID,Date & Time,Product Name,SKU,Vector Type,Quantity Change,Previous Stock,Current Stock,Reason / Note,Supplier,Authorized By\n'];
     const rows = records.map((r) => {
       let diff = r.quantity;
-      if (['stock_out', 'damaged', 'sale'].includes(r.type)) diff = -Math.abs(r.quantity);
+      if (['stock_out', 'damaged', 'sale', 'expired', 'purchase_return', 'transfer_out'].includes(r.type)) diff = -Math.abs(r.quantity);
       else if (r.type === 'adjustment') diff = r.currentStock - r.previousStock;
       else diff = Math.abs(r.quantity);
 
-      const ref = r.reference || `TRX-${r._id.toString().slice(-4).toUpperCase()}`;
-      const dateStr = new Date(r.createdAt).toISOString().replace('T', ' ').slice(0, 19);
-      const prodName = `"${(r.product?.name || 'N/A').replace(/"/g, '""')}"`;
-      const sku = `"${(r.product?.sku || 'N/A').replace(/"/g, '""')}"`;
-      const notes = `"${(r.notes || r.reference || '').replace(/"/g, '""')}"`;
-      const supplierStr = `"${(r.supplier?.name ? `${r.supplier.name} (${r.supplier.company || ''})` : '').replace(/"/g, '""')}"`;
-      const userName = `"${(r.performedBy?.name || 'System').replace(/"/g, '""')}"`;
+      const ref = sanitizeCsvCell(r.reference || `TRX-${r._id.toString().slice(-4).toUpperCase()}`);
+      const dateStr = sanitizeCsvCell(new Date(r.createdAt).toISOString().replace('T', ' ').slice(0, 19));
+      const prodName = sanitizeCsvCell(r.product?.name || 'N/A');
+      const sku = sanitizeCsvCell(r.product?.sku || 'N/A');
+      const notes = sanitizeCsvCell(r.notes || r.reference || '');
+      const supplierStr = sanitizeCsvCell(r.supplier?.name ? `${r.supplier.name} (${r.supplier.company || ''})` : '');
+      const userName = sanitizeCsvCell(r.performedBy?.name || 'System');
 
       return `${ref},${dateStr},${prodName},${sku},${r.type},${diff > 0 ? '+' + diff : diff},${r.previousStock},${r.currentStock},${notes},${supplierStr},${userName}\n`;
     });
@@ -361,7 +388,7 @@ exports.exportInventoryExcel = async (req, res, next) => {
 
     const rows = records.map((r) => {
       let diff = r.quantity;
-      if (['stock_out', 'damaged', 'sale'].includes(r.type)) diff = -Math.abs(r.quantity);
+      if (['stock_out', 'damaged', 'sale', 'expired', 'purchase_return', 'transfer_out'].includes(r.type)) diff = -Math.abs(r.quantity);
       else if (r.type === 'adjustment') diff = r.currentStock - r.previousStock;
       else diff = Math.abs(r.quantity);
 
@@ -427,7 +454,7 @@ exports.exportInventoryPdf = async (req, res, next) => {
     const headers = ['Ref ID', 'Date', 'Product', 'SKU', 'Type', 'Change', 'Balance', 'Authorized By'];
     const rows = records.map((r) => {
       let diff = r.quantity;
-      if (['stock_out', 'damaged', 'sale'].includes(r.type)) diff = -Math.abs(r.quantity);
+      if (['stock_out', 'damaged', 'sale', 'expired', 'purchase_return', 'transfer_out'].includes(r.type)) diff = -Math.abs(r.quantity);
       else if (r.type === 'adjustment') diff = r.currentStock - r.previousStock;
       else diff = Math.abs(r.quantity);
 
@@ -468,35 +495,46 @@ exports.exportInventoryPdf = async (req, res, next) => {
 
 /**
  * POST /api/inventory/stock-in
- * Manual stock intake with atomic increment and humanized activity logging
+ * Manual stock intake with atomic increment, Moving Weighted Average Cost (AVCO), and humanized activity logging
  */
 exports.stockIn = async (req, res, next) => {
   try {
-    const { productId, quantity, reference, notes, supplierId } = req.body;
+    const { productId, quantity, reference, notes, supplierId, unitCost } = req.body;
     const qty = Number(quantity);
-    if (!qty || qty <= 0) {
+    if (!qty || qty <= 0 || !Number.isInteger(qty)) {
       return res.status(400).json({ success: false, message: 'Quantity must be a positive integer greater than zero.' });
     }
 
-    // Atomically increment stock and return the updated product document
-    const product = await Product.findByIdAndUpdate(
-      productId,
-      { $inc: { stock: qty } },
-      { new: true }
-    );
+    const product = await Product.findById(productId);
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found.' });
     }
 
-    const currentStock = product.stock;
-    const previousStock = currentStock - qty;
-    const trxId = reference && reference.trim() ? reference.trim() : generateTrxId();
+    const previousStock = product.stock;
+    const currentStock = previousStock + qty;
+
+    // Moving Weighted Average Cost (MAC / AVCO)
+    const costInput = Number(unitCost);
+    if (Number.isFinite(costInput) && costInput > 0) {
+      if (previousStock <= 0) {
+        product.cost = Math.round(costInput * 100) / 100;
+      } else {
+        const weightedCost = ((previousStock * (product.cost || 0)) + (qty * costInput)) / currentStock;
+        product.cost = Math.round(weightedCost * 100) / 100;
+      }
+    }
+
+    product.stock = currentStock;
+    await product.save();
+
+    const trxId = reference && reference.trim() ? reference.trim() : generateTrxId('TRX');
 
     const record = await Inventory.create({
       product: productId,
       supplier: supplierId || null,
       type: 'stock_in',
       quantity: qty,
+      unitCost: costInput > 0 ? costInput : (product.cost || 0),
       previousStock,
       currentStock,
       reference: trxId,
@@ -540,8 +578,8 @@ exports.stockOut = async (req, res, next) => {
   try {
     const { productId, quantity, reference, notes } = req.body;
     const qty = Number(quantity);
-    if (!qty || qty <= 0) {
-      return res.status(400).json({ success: false, message: 'Quantity must be a positive integer greater than zero.' });
+    if (!qty || qty <= 0 || !Number.isInteger(qty)) {
+      return res.status(400).json({ success: false, message: 'Quantity must be a positive whole integer greater than zero.' });
     }
 
     // Atomic deduction: only updates if current stock is at least qty
@@ -564,7 +602,7 @@ exports.stockOut = async (req, res, next) => {
 
     const currentStock = product.stock;
     const previousStock = currentStock + qty;
-    const trxId = reference && reference.trim() ? reference.trim() : generateTrxId();
+    const trxId = reference && reference.trim() ? reference.trim() : generateTrxId('TRX');
 
     const record = await Inventory.create({
       product: productId,
@@ -613,8 +651,8 @@ exports.damagedStock = async (req, res, next) => {
   try {
     const { productId, quantity, reason, notes } = req.body;
     const qty = Number(quantity);
-    if (!qty || qty <= 0) {
-      return res.status(400).json({ success: false, message: 'Damaged quantity must be a positive number.' });
+    if (!qty || qty <= 0 || !Number.isInteger(qty)) {
+      return res.status(400).json({ success: false, message: 'Damaged quantity must be a positive whole integer.' });
     }
 
     // Atomic deduction: only updates if stock >= qty
@@ -637,7 +675,7 @@ exports.damagedStock = async (req, res, next) => {
 
     const currentStock = product.stock;
     const previousStock = currentStock + qty;
-    const trxId = generateTrxId();
+    const trxId = generateTrxId('DMG');
     const damageDescription = reason ? `${reason}${notes ? `: ${notes}` : ''}` : notes || 'Damaged in warehouse';
 
     const record = await Inventory.create({
@@ -647,6 +685,7 @@ exports.damagedStock = async (req, res, next) => {
       previousStock,
       currentStock,
       reference: trxId,
+      reason: reason || 'Damaged goods write-off',
       notes: damageDescription,
       performedBy: req.user.id,
     });
@@ -681,15 +720,26 @@ exports.damagedStock = async (req, res, next) => {
 
 /**
  * POST /api/inventory/adjust
- * Physical cycle count reconciliation with atomic concurrency protection
+ * Physical cycle count reconciliation with atomic concurrency protection & OCC validation
  */
 exports.adjustStock = async (req, res, next) => {
   try {
-    const { productId, newQuantity, reason, notes } = req.body;
+    const { productId, newQuantity, reason, notes, expectedStock } = req.body;
     const countedQty = Number(newQuantity);
 
-    if (isNaN(countedQty) || countedQty < 0) {
-      return res.status(400).json({ success: false, message: 'Counted physical stock must be a non-negative number.' });
+    if (isNaN(countedQty) || countedQty < 0 || !Number.isInteger(countedQty)) {
+      return res.status(400).json({ success: false, message: 'Counted physical stock must be a non-negative whole integer.' });
+    }
+
+    // OCC: If client provided expectedStock, verify it hasn't changed concurrently
+    if (expectedStock !== undefined && expectedStock !== null) {
+      const current = await Product.findById(productId);
+      if (current && current.stock !== Number(expectedStock)) {
+        return res.status(409).json({
+          success: false,
+          message: `Concurrency conflict: Product stock changed concurrently from ${expectedStock} to ${current.stock}. Please refresh before adjusting.`,
+        });
+      }
     }
 
     // Atomic update returning the product state BEFORE update to reliably capture previousStock
@@ -706,7 +756,7 @@ exports.adjustStock = async (req, res, next) => {
     const previousStock = beforeProduct.stock;
     const diff = countedQty - previousStock;
 
-    const trxId = generateTrxId();
+    const trxId = generateTrxId('ADJ');
     const rationale = reason ? `${reason}${notes ? ` - ${notes}` : ''}` : notes || 'Cycle count reconciliation';
 
     const record = await Inventory.create({
@@ -716,6 +766,7 @@ exports.adjustStock = async (req, res, next) => {
       previousStock,
       currentStock: countedQty,
       reference: trxId,
+      reason: reason || 'Physical count adjustment',
       notes: rationale,
       performedBy: req.user.id,
     });
@@ -776,20 +827,63 @@ exports.getStockByProduct = async (req, res, next) => {
     let totalSold = 0;
     let totalDamaged = 0;
     let totalAdjustments = 0;
+    let hasOpeningRecord = false;
 
     for (const record of history) {
       if (record.type === 'opening_stock') {
         openingStock += record.quantity;
-      } else if (record.type === 'stock_in' || record.type === 'purchase') {
+        hasOpeningRecord = true;
+      } else if (['stock_in', 'purchase', 'transfer_in'].includes(record.type)) {
         totalInbound += record.quantity;
-      } else if (record.type === 'sale' || record.type === 'stock_out') {
+      } else if (record.type === 'sale_return') {
+        totalInbound += record.quantity;
+      } else if (['sale', 'stock_out', 'transfer_out'].includes(record.type)) {
         totalSold += record.quantity;
-      } else if (record.type === 'damaged') {
+      } else if (record.type === 'purchase_return') {
+        totalSold += record.quantity;
+      } else if (['damaged', 'expired'].includes(record.type)) {
         totalDamaged += record.quantity;
       } else if (record.type === 'adjustment') {
         totalAdjustments += (record.currentStock - record.previousStock);
       }
     }
+
+    // Legacy fallback: If product has no opening_stock record
+    if (!hasOpeningRecord) {
+      if (history.length > 0) {
+        // The earliest transaction's previousStock is the baseline opening stock
+        const oldestRecord = history[history.length - 1];
+        openingStock = oldestRecord.previousStock ?? 0;
+      } else {
+        openingStock = product.stock;
+      }
+    }
+
+    const expectedStock = openingStock + totalInbound - totalSold - totalDamaged + totalAdjustments;
+    const auditDiscrepancy = product.stock - expectedStock;
+
+    const enrichedHistory = history.map((record) => {
+      const doc = record.toObject();
+      let differential = doc.quantity;
+      if (['stock_out', 'damaged', 'sale', 'expired', 'purchase_return', 'transfer_out'].includes(doc.type)) {
+        differential = -Math.abs(doc.quantity);
+      } else if (doc.type === 'adjustment') {
+        differential = doc.currentStock - doc.previousStock;
+      } else {
+        differential = Math.abs(doc.quantity);
+      }
+
+      const trxCode = doc.reference && doc.reference.trim()
+        ? doc.reference
+        : `TRX-${doc._id.toString().slice(-4).toUpperCase()}`;
+
+      return {
+        ...doc,
+        differential,
+        quantityChange: differential,
+        trxCode,
+      };
+    });
 
     res.json({
       success: true,
@@ -800,12 +894,16 @@ exports.getStockByProduct = async (req, res, next) => {
         totalSold,
         totalDamaged,
         totalAdjustments,
+        netAdjustments: totalAdjustments,
+        expectedStock,
+        auditDiscrepancy,
+        isAudited: auditDiscrepancy === 0,
         currentStock: product.stock,
         minimumStock: product.minimumStock,
-        valuationCost: Math.round(product.stock * product.cost * 100) / 100,
-        valuationRetail: Math.round(product.stock * product.price * 100) / 100,
+        valuationCost: Math.round(product.stock * (product.cost || 0) * 100) / 100,
+        valuationRetail: Math.round(product.stock * (product.price || 0) * 100) / 100,
       },
-      history,
+      history: enrichedHistory,
     });
   } catch (err) {
     next(err);
@@ -833,6 +931,104 @@ exports.batchCheckLowStock = async (req, res, next) => {
     }
 
     res.json({ success: true, count, products: lowStockProducts });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/inventory/create-draft-po
+ * Scans all products at or below minimumStock, groups by primary supplier,
+ * and creates draft Purchase Orders (status: 'ordered') to replenish to minimumStock * 2 (or minimum deficit + buffer).
+ */
+exports.createDraftPoFromLowStock = async (req, res, next) => {
+  try {
+    const Purchase = require('../models/Purchase');
+    const Supplier = require('../models/Supplier');
+
+    const lowStockProducts = await Product.find({
+      isActive: true,
+      $expr: { $lte: ['$stock', '$minimumStock'] },
+    }).populate('supplier');
+
+    if (lowStockProducts.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No low-stock products currently requiring replenishment.',
+        createdOrders: [],
+      });
+    }
+
+    // Group items by supplier
+    let fallbackSupplier = null;
+    const supplierGroups = new Map();
+
+    for (const prod of lowStockProducts) {
+      let suppId = prod.supplier?._id?.toString();
+      if (!suppId) {
+        if (!fallbackSupplier) {
+          fallbackSupplier = await Supplier.findOne({ isActive: true });
+        }
+        if (fallbackSupplier) {
+          suppId = fallbackSupplier._id.toString();
+        }
+      }
+
+      if (!suppId) continue; // No supplier available in database
+
+      if (!supplierGroups.has(suppId)) {
+        supplierGroups.set(suppId, []);
+      }
+
+      // Recommend replenishment quantity: deficit + 10 units buffer, or minimum 5 units
+      const deficit = Math.max(1, prod.minimumStock - prod.stock);
+      const reorderQty = deficit + Math.max(5, Math.ceil(prod.minimumStock * 0.5));
+      const unitCost = prod.cost || 1;
+
+      supplierGroups.get(suppId).push({
+        product: prod._id,
+        name: prod.name,
+        quantity: reorderQty,
+        cost: unitCost,
+        total: reorderQty * unitCost,
+      });
+    }
+
+    const createdOrders = [];
+
+    for (const [suppId, items] of supplierGroups.entries()) {
+      const totalCost = items.reduce((sum, item) => sum + item.total, 0);
+      const timestamp = Date.now().toString(36).toUpperCase();
+      const random = Math.random().toString(36).substring(2, 6).toUpperCase();
+      const orderNumber = `PO-${timestamp}-${random}`;
+
+      const purchase = await Purchase.create({
+        orderNumber,
+        supplier: suppId,
+        items,
+        totalCost,
+        purchaseDate: new Date(),
+        paymentStatus: 'pending',
+        status: 'ordered',
+        inventoryApplied: false,
+        notes: 'Automated Draft PO generated from Inventory Low-Stock Replenishment',
+        createdBy: req.user.id,
+      });
+
+      await Notification.create({
+        type: 'purchase_ordered',
+        title: 'Auto-Draft Purchase Order Generated',
+        message: `Generated replenishment PO ${orderNumber} with ${items.length} items totaling $${totalCost.toFixed(2)}.`,
+      });
+
+      createdOrders.push(purchase);
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully generated ${createdOrders.length} draft purchase order(s).`,
+      createdOrders,
+    });
   } catch (err) {
     next(err);
   }
