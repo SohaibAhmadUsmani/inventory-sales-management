@@ -2,6 +2,7 @@ import axios from 'axios';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '/api',
+  timeout: 30000,
 });
 
 api.interceptors.request.use((config) => {
@@ -13,7 +14,12 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    const isAuthEndpoint = error.config?.url?.includes('/auth/login');
+    const isAuthPage =
+      ['/login', '/forgot-password'].some((p) => window.location.pathname.startsWith(p)) ||
+      window.location.pathname.startsWith('/reset-password');
+
+    if (error.response?.status === 401 && !isAuthEndpoint && !isAuthPage) {
       localStorage.removeItem('token');
       window.location.href = '/login';
     }
