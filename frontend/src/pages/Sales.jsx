@@ -2,11 +2,13 @@ import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
 import { toast } from 'react-toastify';
 import PageHeader from '../components/PageHeader';
+import useDebounce from '../hooks/useDebounce';
 import {
   FiDownload,
   FiEye,
   FiPrinter,
   FiX,
+  FiXCircle,
   FiChevronLeft,
   FiChevronRight,
 } from 'react-icons/fi';
@@ -19,14 +21,17 @@ const money = (n) =>
 
 export default function Sales() {
   const [sales, setSales] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [dailySales, setDailySales] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
-  const [count, setCount] = useState(0);
 
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 350);
+  const [customerFilter, setCustomerFilter] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('');
   const [status, setStatus] = useState('');
   const [startDate, setStartDate] = useState('');
@@ -36,17 +41,37 @@ export default function Sales() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState(null);
 
+  const [cancellingId, setCancellingId] = useState(null);
   const [downloadingInvoice, setDownloadingInvoice] = useState(false);
-
   const [printingSale, setPrintingSale] = useState(null);
 
-  const hasActiveFilters = search || paymentMethod || status || startDate || endDate;
+  const hasActiveFilters = Boolean(
+    search || customerFilter || paymentMethod || status || startDate || endDate
+  );
+
+  useEffect(() => {
+    api
+      .get('/customers', { params: { limit: 500 } })
+      .then((res) => setCustomers(res.data?.customers || []))
+      .catch(() => {});
+  }, []);
+
+  const fetchDailySummary = useCallback(() => {
+    const params = {};
+    if (startDate) params.startDate = startDate;
+    if (endDate) params.endDate = endDate;
+    api
+      .get('/sales/daily', { params })
+      .then((res) => setDailySales(res.data?.sales || []))
+      .catch(() => setDailySales([]));
+  }, [startDate, endDate]);
 
   const fetchSales = useCallback(() => {
     setLoading(true);
     setError(null);
     const params = { page, limit: 10 };
-    if (search) params.search = search;
+    if (debouncedSearch) params.search = debouncedSearch;
+    if (customerFilter) params.customer = customerFilter;
     if (paymentMethod) params.paymentMethod = paymentMethod;
     if (status) params.status = status;
     if (startDate) params.startDate = startDate;
@@ -55,31 +80,32 @@ export default function Sales() {
     api
       .get('/sales', { params })
       .then((res) => {
-        setSales(res.data.sales || []);
-        setTotalPages(res.data.totalPages || 1);
-        setTotal(res.data.total || 0);
-        setCount(res.data.count || 0);
+        setSales(res.data?.sales || []);
+        setTotalPages(res.data?.totalPages || 1);
+        setTotal(res.data?.total || 0);
       })
       .catch((err) =>
         setError(err.response?.data?.message || 'Failed to load sales')
       )
       .finally(() => setLoading(false));
-  }, [page, search, paymentMethod, status, startDate, endDate]);
-
-  useEffect(() => {
-    setPage(1);
-  }, [search, paymentMethod, status, startDate, endDate]);
+  }, [page, debouncedSearch, customerFilter, paymentMethod, status, startDate, endDate]);
 
   useEffect(() => {
     fetchSales();
   }, [fetchSales]);
 
+  useEffect(() => {
+    fetchDailySummary();
+  }, [fetchDailySummary]);
+
   const clearFilters = () => {
     setSearch('');
+    setCustomerFilter('');
     setPaymentMethod('');
     setStatus('');
     setStartDate('');
     setEndDate('');
+    setPage(1);
   };
 
   const viewSale = (saleId) => {
@@ -102,13 +128,43 @@ export default function Sales() {
     setDetailError(null);
   };
 
+  const handleCancelSale = async (sale) => {
+    if (!sale || sale.status !== 'completed') return;
+    if (
+      !window.confirm(
+        `Cancel sale ${sale.invoiceNumber}? This will restore product stock and reverse customer spending.`
+      )
+    ) {
+      return;
+    }
+    setCancellingId(sale._id);
+    try {
+      const res = await api.put(`/sales/${sale._id}/cancel`);
+      toast.success('Sale cancelled and stock restored');
+      fetchSales();
+      fetchDailySummary();
+      if (selectedSale && selectedSale._id === sale._id) {
+        setSelectedSale((prev) =>
+          prev ? { ...prev, ...(res.data?.sale || {}), status: 'cancelled' } : null
+        );
+      }
+      window.dispatchEvent(new Event('notifications-updated'));
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to cancel sale');
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
   const downloadInvoice = async (saleId, invoiceNumber) => {
     setDownloadingInvoice(true);
     try {
       const res = await api.get(`/sales/${saleId}/invoice`, {
         responseType: 'blob',
       });
-      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const url = window.URL.createObjectURL(
+        new Blob([res.data], { type: 'application/pdf' })
+      );
       const a = document.createElement('a');
       a.href = url;
       a.download = invoiceNumber ? `${invoiceNumber}.pdf` : 'invoice.pdf';
@@ -125,8 +181,13 @@ export default function Sales() {
 
   const handlePrintReceipt = (sale) => {
     setPrintingSale(sale);
-    setTimeout(() => window.print(), 150);
   };
+
+  useEffect(() => {
+    if (!printingSale) return;
+    const timer = setTimeout(() => window.print(), 50);
+    return () => clearTimeout(timer);
+  }, [printingSale]);
 
   useEffect(() => {
     const handleAfterPrint = () => setPrintingSale(null);
@@ -134,17 +195,35 @@ export default function Sales() {
     return () => window.removeEventListener('afterprint', handleAfterPrint);
   }, []);
 
+  const periodRevenue = dailySales.reduce(
+    (sum, d) => sum + Number(d.totalSales || 0),
+    0
+  );
+  const periodOrders = dailySales.reduce(
+    (sum, d) => sum + Number(d.count || 0),
+    0
+  );
+  const avgOrderValue = periodOrders > 0 ? periodRevenue / periodOrders : 0;
+
   return (
     <div>
       <style>{`
+        #receipt-print-area {
+          display: none;
+        }
         @media print {
-          body > * { visibility: hidden !important; }
-          #receipt-print-area,
-          #receipt-print-area * { visibility: visible !important; }
+          .shell-sidebar,
+          .shell-topbar,
+          .sales-screen-area {
+            display: none !important;
+          }
+          .shell-main,
+          .shell-content {
+            margin: 0 !important;
+            padding: 0 !important;
+          }
           #receipt-print-area {
-            position: absolute;
-            left: 0;
-            top: 0;
+            display: block !important;
             width: 100%;
             padding: 24px;
             background: white;
@@ -167,544 +246,630 @@ export default function Sales() {
         }
       `}</style>
 
-      <PageHeader
-        title="Sales History"
-        subtitle={`View and manage all recorded transactions${total > 0 ? ` (${total} total)` : ''}`}
-      />
+      <div className="sales-screen-area">
+        <PageHeader
+          title="Sales History"
+          subtitle={`View and manage all recorded transactions${total > 0 ? ` (${total} total)` : ''}`}
+        />
 
-      <div className="ui-filter-bar">
-        <input
-          className="ui-filter-input"
-          placeholder="Search invoice number..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        <select
-          className="ui-filter-input"
-          value={paymentMethod}
-          onChange={(e) => setPaymentMethod(e.target.value)}
-        >
-          <option value="">All Payment Methods</option>
-          <option value="cash">Cash</option>
-          <option value="card">Card</option>
-          <option value="online">Online</option>
-        </select>
-        <select
-          className="ui-filter-input"
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-        >
-          <option value="">All Statuses</option>
-          <option value="completed">Completed</option>
-          <option value="returned">Returned</option>
-          <option value="cancelled">Cancelled</option>
-        </select>
-        <input
-          type="date"
-          className="ui-filter-input"
-          value={startDate}
-          onChange={(e) => setStartDate(e.target.value)}
-        />
-        <input
-          type="date"
-          className="ui-filter-input"
-          value={endDate}
-          onChange={(e) => setEndDate(e.target.value)}
-        />
-        {hasActiveFilters && (
-          <button className="ui-btn-outline" onClick={clearFilters}>
-            Clear Filters
-          </button>
-        )}
-      </div>
-
-      {!loading && error && (
-        <div
-          className="ui-table-card"
-          style={{ textAlign: 'center', color: 'var(--danger)', padding: 24 }}
-        >
-          {error}
+        <div className="ui-summary-grid">
+          <div className="ui-summary-item">
+            <div className="ui-summary-label">Completed Revenue</div>
+            <div className="ui-summary-value">{money(periodRevenue)}</div>
+          </div>
+          <div className="ui-summary-item">
+            <div className="ui-summary-label">Completed Orders</div>
+            <div className="ui-summary-value">{periodOrders.toLocaleString()}</div>
+          </div>
+          <div className="ui-summary-item">
+            <div className="ui-summary-label">Avg. Order Value</div>
+            <div className="ui-summary-value">{money(avgOrderValue)}</div>
+          </div>
+          <div className="ui-summary-item">
+            <div className="ui-summary-label">Active Sales Days</div>
+            <div className="ui-summary-value">{dailySales.length}</div>
+          </div>
         </div>
-      )}
 
-      {!error && (
-        <div className="ui-table-card">
-          <table>
-            <thead>
-              <tr>
-                <th>Invoice</th>
-                <th>Date</th>
-                <th>Customer</th>
-                <th>Items</th>
-                <th>Total</th>
-                <th>Payment</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan="8" className="loading">
-                    Loading sales...
-                  </td>
-                </tr>
-              ) : sales.length === 0 ? (
-                <tr>
-                  <td
-                    colSpan="8"
-                    style={{
-                      textAlign: 'center',
-                      padding: 40,
-                      color: 'var(--text-light)',
-                    }}
-                  >
-                    {hasActiveFilters
-                      ? 'No sales match the selected filters'
-                      : 'No sales records found'}
-                  </td>
-                </tr>
-              ) : (
-                sales.map((s) => (
-                  <tr key={s._id}>
-                    <td style={{ fontWeight: 600 }}>{s.invoiceNumber}</td>
-                    <td>{new Date(s.createdAt).toLocaleDateString()}</td>
-                    <td>{s.customer?.name || 'Walk-in'}</td>
-                    <td>{s.items.length}</td>
-                    <td style={{ fontWeight: 600 }}>{money(s.total)}</td>
-                    <td>
-                      <span className="badge badge-info">
-                        {s.paymentMethod}
-                      </span>
-                    </td>
-                    <td>
-                      <span
-                        className={`badge badge-${
-                          s.status === 'completed'
-                            ? 'success'
-                            : s.status === 'returned'
-                            ? 'warning'
-                            : 'danger'
-                        }`}
-                      >
-                        {s.status}
-                      </span>
-                    </td>
-                    <td>
-                      <button
-                        className="btn btn-secondary"
-                        style={{ padding: '4px 12px', fontSize: 12 }}
-                        onClick={() => viewSale(s._id)}
-                      >
-                        <FiEye size={13} /> View
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-
-          {!loading && sales.length > 0 && (
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginTop: 16,
-                flexWrap: 'wrap',
-                gap: 8,
-              }}
-            >
-              <span style={{ fontSize: 13, color: 'var(--text-light)' }}>
-                Showing {(page - 1) * 10 + 1}–{Math.min(page * 10, total)} of{' '}
-                {total} sales
-              </span>
-              <div
-                style={{ display: 'flex', gap: 8, alignItems: 'center' }}
-              >
-                <button
-                  className="btn btn-secondary"
-                  disabled={page <= 1}
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                >
-                  <FiChevronLeft size={14} /> Previous
-                </button>
-                <span
-                  style={{ fontSize: 14, color: 'var(--text-light)' }}
-                >
-                  Page {page} of {totalPages}
-                </span>
-                <button
-                  className="btn btn-secondary"
-                  disabled={page >= totalPages}
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                >
-                  Next <FiChevronRight size={14} />
-                </button>
-              </div>
-            </div>
+        <div className="ui-filter-bar">
+          <input
+            className="ui-filter-input"
+            placeholder="Search invoice number..."
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(1);
+            }}
+          />
+          <select
+            className="ui-filter-input"
+            value={customerFilter}
+            onChange={(e) => {
+              setCustomerFilter(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">All Customers</option>
+            {customers.map((c) => (
+              <option key={c._id} value={c._id}>
+                {c.name}
+                {c.phone ? ` (${c.phone})` : ''}
+              </option>
+            ))}
+          </select>
+          <select
+            className="ui-filter-input"
+            value={paymentMethod}
+            onChange={(e) => {
+              setPaymentMethod(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">All Payment Methods</option>
+            <option value="cash">Cash</option>
+            <option value="card">Card</option>
+            <option value="online">Online</option>
+          </select>
+          <select
+            className="ui-filter-input"
+            value={status}
+            onChange={(e) => {
+              setStatus(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">All Statuses</option>
+            <option value="completed">Completed</option>
+            <option value="returned">Returned</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <input
+            type="date"
+            aria-label="Start date"
+            className="ui-filter-input"
+            value={startDate}
+            max={endDate || undefined}
+            onChange={(e) => {
+              setStartDate(e.target.value);
+              setPage(1);
+            }}
+          />
+          <input
+            type="date"
+            aria-label="End date"
+            className="ui-filter-input"
+            value={endDate}
+            min={startDate || undefined}
+            onChange={(e) => {
+              setEndDate(e.target.value);
+              setPage(1);
+            }}
+          />
+          {hasActiveFilters && (
+            <button className="ui-btn-outline" onClick={clearFilters}>
+              Clear Filters
+            </button>
           )}
         </div>
-      )}
 
-      {detailLoading && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.5)',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            zIndex: 1000,
-          }}
-        >
-          <div className="card" style={{ padding: 40, textAlign: 'center' }}>
-            <div className="loading" style={{ height: 'auto' }}>
-              Loading sale details...
-            </div>
-          </div>
-        </div>
-      )}
-
-      {detailError && !detailLoading && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.5)',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            zIndex: 1000,
-          }}
-          onClick={closeDetail}
-        >
+        {!loading && error && (
           <div
-            className="card"
-            style={{ width: 400, textAlign: 'center' }}
-            onClick={(e) => e.stopPropagation()}
+            className="ui-table-card"
+            style={{ textAlign: 'center', color: 'var(--danger)', padding: 24 }}
           >
-            <p style={{ color: 'var(--danger)', marginBottom: 16 }}>
-              {detailError}
-            </p>
-            <button className="btn btn-secondary" onClick={closeDetail}>
-              Close
+            <p style={{ marginBottom: 12 }}>{error}</p>
+            <button className="btn btn-secondary" onClick={fetchSales}>
+              Retry
             </button>
           </div>
-        </div>
-      )}
+        )}
 
-      {selectedSale && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.5)',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            zIndex: 1000,
-          }}
-          onClick={closeDetail}
-        >
-          <div
-            className="card"
-            style={{
-              width: 650,
-              maxHeight: '85vh',
-              overflow: 'auto',
-              position: 'relative',
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              onClick={closeDetail}
-              style={{
-                position: 'absolute',
-                top: 16,
-                right: 16,
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'var(--text-light)',
-              }}
-            >
-              <FiX size={20} />
-            </button>
-
-            <h2 style={{ marginBottom: 4, paddingRight: 32 }}>
-              Sale Details
-            </h2>
-            <p
-              style={{
-                fontSize: 13,
-                color: 'var(--text-light)',
-                marginBottom: 16,
-              }}
-            >
-              {selectedSale.invoiceNumber}
-            </p>
-
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr 1fr',
-                gap: 12,
-                marginBottom: 16,
-              }}
-            >
-              <div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--text-light)',
-                    marginBottom: 2,
-                  }}
-                >
-                  Date
-                </div>
-                <div style={{ fontWeight: 500 }}>
-                  {new Date(selectedSale.createdAt).toLocaleString()}
-                </div>
-              </div>
-              <div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--text-light)',
-                    marginBottom: 2,
-                  }}
-                >
-                  Customer
-                </div>
-                <div style={{ fontWeight: 500 }}>
-                  {selectedSale.customer?.name || 'Walk-in'}
-                </div>
-                {selectedSale.customer?.phone && (
-                  <div style={{ fontSize: 12, color: 'var(--text-light)' }}>
-                    {selectedSale.customer.phone}
-                  </div>
-                )}
-                {selectedSale.customer?.email && (
-                  <div style={{ fontSize: 12, color: 'var(--text-light)' }}>
-                    {selectedSale.customer.email}
-                  </div>
-                )}
-              </div>
-              <div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--text-light)',
-                    marginBottom: 2,
-                  }}
-                >
-                  Payment Method
-                </div>
-                <span className="badge badge-info">
-                  {selectedSale.paymentMethod}
-                </span>
-              </div>
-              <div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--text-light)',
-                    marginBottom: 2,
-                  }}
-                >
-                  Payment Status
-                </div>
-                <span
-                  className={`badge badge-${
-                    selectedSale.paymentStatus === 'paid'
-                      ? 'success'
-                      : selectedSale.paymentStatus === 'pending'
-                      ? 'warning'
-                      : 'info'
-                  }`}
-                >
-                  {selectedSale.paymentStatus}
-                </span>
-              </div>
-              <div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--text-light)',
-                    marginBottom: 2,
-                  }}
-                >
-                  Sale Status
-                </div>
-                <span
-                  className={`badge badge-${
-                    selectedSale.status === 'completed'
-                      ? 'success'
-                      : selectedSale.status === 'returned'
-                      ? 'warning'
-                      : 'danger'
-                  }`}
-                >
-                  {selectedSale.status}
-                </span>
-              </div>
-              <div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--text-light)',
-                    marginBottom: 2,
-                  }}
-                >
-                  Salesperson
-                </div>
-                <div style={{ fontWeight: 500 }}>
-                  {selectedSale.createdBy?.name || 'System'}
-                </div>
-              </div>
-            </div>
-
-            <h3 style={{ fontSize: 14, marginBottom: 8 }}>Items</h3>
-            <table style={{ marginBottom: 16 }}>
+        {!error && (
+          <div className="ui-table-card">
+            <table>
               <thead>
                 <tr>
-                  <th>Product</th>
-                  <th>SKU</th>
-                  <th>Qty</th>
-                  <th>Price</th>
-                  <th style={{ textAlign: 'right' }}>Total</th>
+                  <th>Invoice</th>
+                  <th>Date</th>
+                  <th>Customer</th>
+                  <th>Items</th>
+                  <th>Total</th>
+                  <th>Payment</th>
+                  <th>Status</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {selectedSale.items.map((item, idx) => (
-                  <tr key={idx}>
-                    <td>{item.name}</td>
-                    <td>{item.sku || '-'}</td>
-                    <td>{item.quantity}</td>
-                    <td>{money(item.price)}</td>
-                    <td style={{ textAlign: 'right', fontWeight: 600 }}>
-                      {money(item.total)}
+                {loading ? (
+                  <tr>
+                    <td colSpan="8" className="loading">
+                      Loading sales...
                     </td>
                   </tr>
-                ))}
+                ) : sales.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan="8"
+                      style={{
+                        textAlign: 'center',
+                        padding: 40,
+                        color: 'var(--text-light)',
+                      }}
+                    >
+                      {hasActiveFilters
+                        ? 'No sales match the selected filters'
+                        : 'No sales records found'}
+                    </td>
+                  </tr>
+                ) : (
+                  sales.map((s) => (
+                    <tr key={s._id}>
+                      <td style={{ fontWeight: 600 }}>{s.invoiceNumber}</td>
+                      <td>{new Date(s.createdAt).toLocaleDateString()}</td>
+                      <td>{s.customer?.name || 'Walk-in'}</td>
+                      <td>{(s.items || []).length}</td>
+                      <td style={{ fontWeight: 600 }}>{money(s.total)}</td>
+                      <td>
+                        <span className="badge badge-info">
+                          {s.paymentMethod}
+                        </span>
+                      </td>
+                      <td>
+                        <span
+                          className={`badge badge-${
+                            s.status === 'completed'
+                              ? 'success'
+                              : s.status === 'returned'
+                              ? 'warning'
+                              : 'danger'
+                          }`}
+                        >
+                          {s.status}
+                        </span>
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: '4px 12px', fontSize: 12 }}
+                            onClick={() => viewSale(s._id)}
+                          >
+                            <FiEye size={13} /> View
+                          </button>
+                          {s.status === 'completed' && (
+                            <button
+                              className="btn btn-danger"
+                              style={{ padding: '4px 10px', fontSize: 12 }}
+                              disabled={cancellingId === s._id}
+                              onClick={() => handleCancelSale(s)}
+                              title="Cancel sale and restore stock"
+                            >
+                              <FiXCircle size={13} />{' '}
+                              {cancellingId === s._id ? 'Cancelling...' : 'Cancel Sale'}
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
 
-            <div
-              style={{
-                borderTop: '2px solid var(--border)',
-                paddingTop: 12,
-                marginBottom: 16,
-              }}
-            >
+            {!loading && sales.length > 0 && (
               <div
                 style={{
                   display: 'flex',
                   justifyContent: 'space-between',
-                  marginBottom: 6,
+                  alignItems: 'center',
+                  marginTop: 16,
+                  flexWrap: 'wrap',
+                  gap: 8,
                 }}
               >
-                <span>Subtotal</span>
-                <span>{money(selectedSale.subtotal)}</span>
-              </div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  marginBottom: 6,
-                }}
-              >
-                <span>Discount</span>
-                <span style={{ color: 'var(--danger)' }}>
-                  -{money(selectedSale.discount)}
+                <span style={{ fontSize: 13, color: 'var(--text-light)' }}>
+                  Showing {(page - 1) * 10 + 1}–{Math.min(page * 10, total)} of{' '}
+                  {total} sales
                 </span>
-              </div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  marginBottom: 6,
-                }}
-              >
-                <span>Tax</span>
-                <span>+{money(selectedSale.tax)}</span>
-              </div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  fontSize: 18,
-                  fontWeight: 700,
-                  marginTop: 8,
-                  paddingTop: 8,
-                  borderTop: '1px solid var(--border)',
-                }}
-              >
-                <span>Grand Total</span>
-                <span style={{ color: 'var(--primary)' }}>
-                  {money(selectedSale.total)}
-                </span>
-              </div>
-            </div>
-
-            {selectedSale.notes && (
-              <div style={{ marginBottom: 16 }}>
                 <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--text-light)',
-                    marginBottom: 4,
-                  }}
+                  style={{ display: 'flex', gap: 8, alignItems: 'center' }}
                 >
-                  Notes
-                </div>
-                <div
-                  style={{
-                    background: 'var(--bg)',
-                    padding: 12,
-                    borderRadius: 8,
-                    fontSize: 14,
-                  }}
-                >
-                  {selectedSale.notes}
+                  <button
+                    className="btn btn-secondary"
+                    disabled={page <= 1}
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  >
+                    <FiChevronLeft size={14} /> Previous
+                  </button>
+                  <span
+                    style={{ fontSize: 14, color: 'var(--text-light)' }}
+                  >
+                    Page {page} of {totalPages}
+                  </span>
+                  <button
+                    className="btn btn-secondary"
+                    disabled={page >= totalPages}
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  >
+                    Next <FiChevronRight size={14} />
+                  </button>
                 </div>
               </div>
             )}
+          </div>
+        )}
 
+        {detailLoading && (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.5)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              zIndex: 1000,
+            }}
+          >
+            <div className="card" style={{ padding: 40, textAlign: 'center' }}>
+              <div className="loading" style={{ height: 'auto' }}>
+                Loading sale details...
+              </div>
+            </div>
+          </div>
+        )}
+
+        {detailError && !detailLoading && (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.5)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              zIndex: 1000,
+            }}
+            onClick={closeDetail}
+          >
             <div
-              style={{
-                display: 'flex',
-                gap: 8,
-                justifyContent: 'flex-end',
-              }}
+              className="card"
+              style={{ width: 400, maxWidth: '95vw', textAlign: 'center' }}
+              onClick={(e) => e.stopPropagation()}
             >
-              <button
-                className="btn btn-secondary"
-                onClick={() =>
-                  downloadInvoice(
-                    selectedSale._id,
-                    selectedSale.invoiceNumber
-                  )
-                }
-                disabled={downloadingInvoice}
-              >
-                <FiDownload size={14} />
-                {downloadingInvoice ? 'Downloading...' : 'Download Invoice'}
-              </button>
-              <button
-                className="btn btn-primary"
-                onClick={() => handlePrintReceipt(selectedSale)}
-              >
-                <FiPrinter size={14} />
-                Print Receipt
+              <p style={{ color: 'var(--danger)', marginBottom: 16 }}>
+                {detailError}
+              </p>
+              <button className="btn btn-secondary" onClick={closeDetail}>
+                Close
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+
+        {selectedSale && (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.5)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              zIndex: 1000,
+            }}
+            onClick={closeDetail}
+          >
+            <div
+              className="card"
+              style={{
+                width: 650,
+                maxWidth: '95vw',
+                maxHeight: '85vh',
+                overflow: 'auto',
+                position: 'relative',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={closeDetail}
+                style={{
+                  position: 'absolute',
+                  top: 16,
+                  right: 16,
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  color: 'var(--text-light)',
+                }}
+              >
+                <FiX size={20} />
+              </button>
+
+              <h2 style={{ marginBottom: 4, paddingRight: 32 }}>
+                Sale Details
+              </h2>
+              <p
+                style={{
+                  fontSize: 13,
+                  color: 'var(--text-light)',
+                  marginBottom: 16,
+                }}
+              >
+                {selectedSale.invoiceNumber}
+              </p>
+
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr',
+                  gap: 12,
+                  marginBottom: 16,
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-light)',
+                      marginBottom: 2,
+                    }}
+                  >
+                    Date
+                  </div>
+                  <div style={{ fontWeight: 500 }}>
+                    {new Date(selectedSale.createdAt).toLocaleString()}
+                  </div>
+                </div>
+                <div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-light)',
+                      marginBottom: 2,
+                    }}
+                  >
+                    Customer
+                  </div>
+                  <div style={{ fontWeight: 500 }}>
+                    {selectedSale.customer?.name || 'Walk-in'}
+                  </div>
+                  {selectedSale.customer?.phone && (
+                    <div style={{ fontSize: 12, color: 'var(--text-light)' }}>
+                      {selectedSale.customer.phone}
+                    </div>
+                  )}
+                  {selectedSale.customer?.email && (
+                    <div style={{ fontSize: 12, color: 'var(--text-light)' }}>
+                      {selectedSale.customer.email}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-light)',
+                      marginBottom: 2,
+                    }}
+                  >
+                    Payment Method
+                  </div>
+                  <span className="badge badge-info">
+                    {selectedSale.paymentMethod}
+                  </span>
+                </div>
+                <div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-light)',
+                      marginBottom: 2,
+                    }}
+                  >
+                    Payment Status
+                  </div>
+                  <span
+                    className={`badge badge-${
+                      selectedSale.paymentStatus === 'paid'
+                        ? 'success'
+                        : selectedSale.paymentStatus === 'pending'
+                        ? 'warning'
+                        : 'info'
+                    }`}
+                  >
+                    {selectedSale.paymentStatus}
+                  </span>
+                </div>
+                <div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-light)',
+                      marginBottom: 2,
+                    }}
+                  >
+                    Sale Status
+                  </div>
+                  <span
+                    className={`badge badge-${
+                      selectedSale.status === 'completed'
+                        ? 'success'
+                        : selectedSale.status === 'returned'
+                        ? 'warning'
+                        : 'danger'
+                    }`}
+                  >
+                    {selectedSale.status}
+                  </span>
+                </div>
+                <div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-light)',
+                      marginBottom: 2,
+                    }}
+                  >
+                    Salesperson
+                  </div>
+                  <div style={{ fontWeight: 500 }}>
+                    {selectedSale.createdBy?.name || 'System'}
+                  </div>
+                </div>
+              </div>
+
+              <h3 style={{ fontSize: 14, marginBottom: 8 }}>Items</h3>
+              <table style={{ marginBottom: 16 }}>
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th>SKU</th>
+                    <th>Qty</th>
+                    <th>Price</th>
+                    <th style={{ textAlign: 'right' }}>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(selectedSale.items || []).map((item, idx) => (
+                    <tr key={idx}>
+                      <td>{item.name}</td>
+                      <td>{item.sku || '-'}</td>
+                      <td>{item.quantity}</td>
+                      <td>{money(item.price)}</td>
+                      <td style={{ textAlign: 'right', fontWeight: 600 }}>
+                        {money(item.total)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <div
+                style={{
+                  borderTop: '2px solid var(--border)',
+                  paddingTop: 12,
+                  marginBottom: 16,
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    marginBottom: 6,
+                  }}
+                >
+                  <span>Subtotal</span>
+                  <span>{money(selectedSale.subtotal)}</span>
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    marginBottom: 6,
+                  }}
+                >
+                  <span>Discount</span>
+                  <span style={{ color: 'var(--danger)' }}>
+                    -{money(selectedSale.discount)}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    marginBottom: 6,
+                  }}
+                >
+                  <span>Tax</span>
+                  <span>+{money(selectedSale.tax)}</span>
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    fontSize: 18,
+                    fontWeight: 700,
+                    marginTop: 8,
+                    paddingTop: 8,
+                    borderTop: '1px solid var(--border)',
+                  }}
+                >
+                  <span>Grand Total</span>
+                  <span style={{ color: 'var(--primary)' }}>
+                    {money(selectedSale.total)}
+                  </span>
+                </div>
+              </div>
+
+              {selectedSale.notes && (
+                <div style={{ marginBottom: 16 }}>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-light)',
+                      marginBottom: 4,
+                    }}
+                  >
+                    Notes
+                  </div>
+                  <div
+                    style={{
+                      background: 'var(--bg)',
+                      padding: 12,
+                      borderRadius: 8,
+                      fontSize: 14,
+                    }}
+                  >
+                    {selectedSale.notes}
+                  </div>
+                </div>
+              )}
+
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 8,
+                  justifyContent: 'flex-end',
+                  flexWrap: 'wrap',
+                }}
+              >
+                {selectedSale.status === 'completed' && (
+                  <button
+                    className="btn btn-danger"
+                    disabled={cancellingId === selectedSale._id}
+                    onClick={() => handleCancelSale(selectedSale)}
+                  >
+                    <FiXCircle size={14} />{' '}
+                    {cancellingId === selectedSale._id
+                      ? 'Cancelling...'
+                      : 'Cancel Sale'}
+                  </button>
+                )}
+                <button
+                  className="btn btn-secondary"
+                  onClick={() =>
+                    downloadInvoice(
+                      selectedSale._id,
+                      selectedSale.invoiceNumber
+                    )
+                  }
+                  disabled={downloadingInvoice}
+                >
+                  <FiDownload size={14} />{' '}
+                  {downloadingInvoice ? 'Downloading...' : 'Download Invoice'}
+                </button>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => handlePrintReceipt(selectedSale)}
+                >
+                  <FiPrinter size={14} /> Print Receipt
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
       {printingSale && (
         <div id="receipt-print-area">
@@ -754,7 +919,7 @@ export default function Sales() {
               </tr>
             </thead>
             <tbody>
-              {printingSale.items.map((item, idx) => (
+              {(printingSale.items || []).map((item, idx) => (
                 <tr key={idx}>
                   <td>{item.name}</td>
                   <td>{item.quantity}</td>

@@ -19,8 +19,7 @@
     "multer": "^1.4.5-lts.1",
     "xlsx": "^0.18.5",
     "pdfkit": "^0.15.0",
-    "pdfkit-table": "^0.1.99",
-    "socket.io": "^4.7.5"
+    "pdfkit-table": "^0.1.99"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"

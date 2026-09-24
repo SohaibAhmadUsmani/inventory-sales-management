@@ -21,7 +21,20 @@ const inventorySchema = new mongoose.Schema({
     ],
     required: true,
   },
-  quantity: { type: Number, required: true, min: [0.001, 'Quantity must be greater than zero'] },
+  quantity: {
+    type: Number,
+    required: true,
+    min: [0, 'Quantity cannot be negative'],
+    validate: {
+      validator: function (val) {
+        if (['opening_stock', 'adjustment'].includes(this.type)) {
+          return Number.isFinite(val) && val >= 0;
+        }
+        return Number.isFinite(val) && val >= 0.001;
+      },
+      message: 'Quantity must be greater than zero',
+    },
+  },
   previousStock: { type: Number, required: true },
   currentStock: { type: Number, required: true },
   unitCost: { type: Number, default: 0 },
@@ -32,7 +45,7 @@ const inventorySchema = new mongoose.Schema({
   notes: { type: String, default: '' },
   isVoided: { type: Boolean, default: false, index: true },
   voidReason: { type: String, default: '' },
-  idempotencyKey: { type: String, sparse: true },
+  idempotencyKey: { type: String, unique: true, sparse: true },
   performedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
 

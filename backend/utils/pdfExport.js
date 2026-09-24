@@ -1,29 +1,49 @@
 const PDFDocument = require('pdfkit-table');
 
+const sanitizeFilename = (rawName, fallback = 'Document') => {
+  const safeName = String(rawName || fallback).replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '');
+  return safeName || fallback;
+};
+
+const fmtMoney = (val) => Number(val || 0).toFixed(2);
+
 exports.generateInvoicePDF = (sale, res) => {
   const doc = new PDFDocument({ margin: 50 });
+  const safeName = sanitizeFilename(sale?.invoiceNumber, 'Invoice');
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=${sale.invoiceNumber}.pdf`);
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.pdf"`);
+  res.on('close', () => {
+    if (!res.writableEnded) doc.destroy();
+  });
   doc.pipe(res);
 
   doc.fontSize(20).text('INVOICE', { align: 'center' });
   doc.moveDown();
-  doc.fontSize(12).text(`Invoice #: ${sale.invoiceNumber}`);
-  doc.text(`Date: ${new Date(sale.createdAt).toLocaleDateString()}`);
-  doc.text(`Payment Method: ${sale.paymentMethod}`);
-  if (sale.customer) doc.text(`Customer: ${sale.customer.name}`);
+  doc.fontSize(12).text(`Invoice #: ${sale?.invoiceNumber || 'N/A'}`);
+  doc.text(`Date: ${sale?.createdAt ? new Date(sale.createdAt).toLocaleDateString() : new Date().toLocaleDateString()}`);
+  doc.text(`Payment Method: ${sale?.paymentMethod || 'N/A'}`);
+  if (sale?.paymentStatus) doc.text(`Payment Status: ${sale.paymentStatus}`);
+  if (sale?.customer) {
+    doc.text(`Customer: ${sale.customer.name || 'Walk-in'}`);
+    if (sale.customer.phone) doc.text(`Phone: ${sale.customer.phone}`);
+    if (sale.customer.email) doc.text(`Email: ${sale.customer.email}`);
+    if (sale.customer.address) doc.text(`Address: ${sale.customer.address}`);
+  }
   doc.moveDown();
 
   doc.fontSize(14).text('Items', { underline: true });
   doc.moveDown(0.5);
-  sale.items.forEach(item => {
-    doc.fontSize(10).text(`${item.name} x ${item.quantity} - $${item.total.toFixed(2)}`);
+  (sale?.items || []).forEach((item) => {
+    const qty = Number(item?.quantity || 0);
+    const unitPrice = fmtMoney(item?.price);
+    const lineTotal = fmtMoney(item?.total ?? (qty * Number(item?.price || 0)));
+    doc.fontSize(10).text(`${item?.name || 'Item'} x ${qty} @ $${unitPrice} - $${lineTotal}`);
   });
   doc.moveDown();
-  doc.text(`Subtotal: $${sale.subtotal.toFixed(2)}`);
-  if (sale.discount > 0) doc.text(`Discount: -$${sale.discount.toFixed(2)}`);
-  if (sale.tax > 0) doc.text(`Tax: $${sale.tax.toFixed(2)}`);
-  doc.fontSize(14).text(`Total: $${sale.total.toFixed(2)}`, { underline: true });
+  doc.fontSize(11).text(`Subtotal: $${fmtMoney(sale?.subtotal)}`);
+  if (Number(sale?.discount || 0) > 0) doc.text(`Discount: -$${fmtMoney(sale?.discount)}`);
+  if (Number(sale?.tax || 0) > 0) doc.text(`Tax: $${fmtMoney(sale?.tax)}`);
+  doc.fontSize(14).text(`Total: $${fmtMoney(sale?.total)}`, { underline: true });
 
   doc.end();
 };
@@ -33,10 +53,14 @@ exports.generateInvoicePDF = (sale, res) => {
  * covering sales, profit, top products, revenue by category and stock health).
  */
 exports.generateMonthlyBusinessReportPDF = async (data, res) => {
-  const { monthLabel, salesSummary, profitSummary, topProducts, categoryRevenue, lowStockCount, newCustomers } = data;
+  const { monthLabel = 'Monthly', salesSummary = {}, profitSummary = {}, topProducts = [], categoryRevenue = [], lowStockCount = 0, newCustomers = 0 } = data || {};
   const doc = new PDFDocument({ margin: 40, size: 'A4' });
+  const safeName = sanitizeFilename(`Monthly_Business_Report_${monthLabel}`, 'Monthly_Business_Report');
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=Monthly_Business_Report_${monthLabel.replace(/\s+/g, '_')}.pdf`);
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.pdf"`);
+  res.on('close', () => {
+    if (!res.writableEnded) doc.destroy();
+  });
   doc.pipe(res);
 
   doc.fontSize(20).font('Helvetica-Bold').text('Monthly Business Report', { align: 'center' });
@@ -48,8 +72,8 @@ exports.generateMonthlyBusinessReportPDF = async (data, res) => {
   doc.fontSize(13).font('Helvetica-Bold').text('Summary');
   doc.moveDown(0.3);
   doc.fontSize(10).font('Helvetica');
-  doc.text(`Total Revenue: $${salesSummary.totalRevenue}      Total Sales: ${salesSummary.totalSales}      Avg Sale: $${salesSummary.avgSale}`);
-  doc.text(`Total Cost: $${profitSummary.totalCost}      Total Profit: $${profitSummary.totalProfit}`);
+  doc.text(`Total Revenue: $${fmtMoney(salesSummary.totalRevenue)}      Total Sales: ${salesSummary.totalSales ?? 0}      Avg Sale: $${fmtMoney(salesSummary.avgSale)}`);
+  doc.text(`Total Cost: $${fmtMoney(profitSummary.totalCost)}      Total Profit: $${fmtMoney(profitSummary.totalProfit)}`);
   doc.text(`Low Stock Products: ${lowStockCount}      New Customers This Month: ${newCustomers}`);
   doc.moveDown(1);
 
@@ -91,10 +115,14 @@ exports.generateMonthlyBusinessReportPDF = async (data, res) => {
  * @param {Object} res - express response
  */
 exports.generateReportPDF = async (opts, res) => {
-  const { title, dateRange, filters = [], headers, rows, totals } = opts;
+  const { title = 'Report', dateRange, filters = [], headers = [], rows = [], totals } = opts || {};
   const doc = new PDFDocument({ margin: 40, size: 'A4' });
+  const safeName = sanitizeFilename(title, 'Report');
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=${title.replace(/\s+/g, '_')}.pdf`);
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.pdf"`);
+  res.on('close', () => {
+    if (!res.writableEnded) doc.destroy();
+  });
   doc.pipe(res);
 
   doc.fontSize(18).font('Helvetica-Bold').text(title, { align: 'center' });
@@ -119,7 +147,7 @@ exports.generateReportPDF = async (opts, res) => {
       { headers, rows: tableRows },
       {
         prepareHeader: () => doc.font('Helvetica-Bold').fontSize(9),
-        prepareRow: (row, indexColumn, indexRow, rectRow) => {
+        prepareRow: (row, indexColumn, indexRow) => {
           const isTotals = totals && indexRow === tableRows.length - 1;
           doc.font(isTotals ? 'Helvetica-Bold' : 'Helvetica').fontSize(9);
         },
@@ -131,3 +159,4 @@ exports.generateReportPDF = async (opts, res) => {
 
   doc.end();
 };
+

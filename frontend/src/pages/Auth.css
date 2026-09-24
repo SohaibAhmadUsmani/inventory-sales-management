@@ -460,6 +460,13 @@
   color: #c7d2fe;
 }
 
+.auth-btn:focus-visible,
+.auth-eye-btn:focus-visible,
+.auth-back-link a:focus-visible {
+  outline: 2px solid #a5b4fc;
+  outline-offset: 2px;
+}
+
 /* ---- Footer text ---- */
 .auth-footer {
   text-align: center;

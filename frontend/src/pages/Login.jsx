@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { FiBox, FiMail, FiLock, FiEye, FiEyeOff, FiAlertCircle } from 'react-icons/fi';
 import loginBg from '../assets/login background.mp4';
@@ -14,20 +14,28 @@ export default function Login() {
   const videoRef = useRef(null);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
+    const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
     if (videoRef.current) {
-      videoRef.current.playbackRate = 0.7;
+      if (prefersReducedMotion) {
+        videoRef.current.pause();
+      } else {
+        videoRef.current.playbackRate = 0.7;
+      }
     }
   }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    const trimmedEmail = email.trim();
     setLoading(true);
     try {
-      await login(email, password);
-      navigate('/');
+      await login(trimmedEmail, password);
+      const redirectTo = location.state?.from?.pathname || '/';
+      navigate(redirectTo, { replace: true });
     } catch (err) {
       setError(err.response?.data?.message || 'Login failed. Please try again.');
     } finally {
@@ -44,6 +52,7 @@ export default function Login() {
         muted
         loop
         playsInline
+        aria-hidden="true"
         src={loginBg}
       />
       <div className="auth-bg-overlay" />
@@ -93,7 +102,7 @@ export default function Login() {
 
           <form className="auth-form" onSubmit={handleSubmit}>
             {error && (
-              <div className="auth-error" key={error}>
+              <div className="auth-error" key={error} role="alert" aria-live="assertive">
                 <span className="auth-error-icon">
                   <FiAlertCircle size={16} />
                 </span>
@@ -141,7 +150,6 @@ export default function Login() {
                   type="button"
                   className="auth-eye-btn"
                   onClick={() => setShowPassword(!showPassword)}
-                  tabIndex={-1}
                   aria-label={showPassword ? 'Hide password' : 'Show password'}
                 >
                   {showPassword ? <FiEyeOff size={16} /> : <FiEye size={16} />}
