@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useAuth } from '../context/AuthContext';
 import useDebounce from '../hooks/useDebounce';
 import api from '../services/api';
 import { toast } from 'react-toastify';
@@ -30,13 +31,24 @@ import {
 import './Inventory.css';
 
 const resolveImageUrl = (img) => {
-  if (!img) return '';
-  if (img.startsWith('http')) return img;
-  const baseUrl = import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:5000';
-  return `${baseUrl}${img}`;
+  if (!img) return null;
+  if (/^(https?:|blob:|data:)/i.test(img)) return img;
+  const base = (import.meta.env.VITE_API_URL || 'http://localhost:5000/api').replace(/\/api\/?$/, '');
+  const cleanPath = String(img).replace(/\\/g, '/').replace(/^\/?uploads\/?/, '');
+  return `${base}/uploads/${cleanPath}`;
+};
+
+const formatLocalDate = (d) => {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 };
 
 export default function Inventory() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+
   // Navigation tabs: 'history' | 'alerts' | 'current'
   const [activeTab, setActiveTab] = useState('history');
 
@@ -75,7 +87,7 @@ export default function Inventory() {
   const [catalogPage, setCatalogPage] = useState(1);
   const [catalogTotalPages, setCatalogTotalPages] = useState(1);
   const [catalogTotalEntries, setCatalogTotalEntries] = useState(0);
-  const [generatingPo, setGeneratingPo] = useState(false);
+  const [creatingPo, setCreatingPo] = useState(false);
 
   // Real Data: Suppliers, Products, and Categories
   const [productsList, setProductsList] = useState([]);
@@ -119,21 +131,27 @@ export default function Inventory() {
       .finally(() => setStatsLoading(false));
   }, []);
 
-  // Calculate start date string based on preset or custom range
+  // Calculate start date string based on preset or custom range using local calendar dates
   const getDateRangeParams = useCallback(() => {
     if (dateFilter === 'today') {
-      const today = new Date().toISOString().split('T')[0];
+      const today = formatLocalDate(new Date());
       return { startDate: today, endDate: today };
     }
     if (dateFilter === '7days') {
-      const d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const d = formatLocalDate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
       return { startDate: d };
     }
     if (dateFilter === '30days') {
-      const d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const d = formatLocalDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
       return { startDate: d };
     }
     if (dateFilter === 'custom') {
+      if (customStartDate && customEndDate && customStartDate > customEndDate) {
+        return {
+          startDate: customEndDate,
+          endDate: customStartDate,
+        };
+      }
       return {
         startDate: customStartDate || undefined,
         endDate: customEndDate || undefined,
@@ -143,7 +161,7 @@ export default function Inventory() {
   }, [dateFilter, customStartDate, customEndDate]);
 
   // Fetch Movement History Ledger with filters
-  const fetchInventory = useCallback(() => {
+  const fetchInventory = useCallback((signal) => {
     setLoading(true);
     const dateParams = getDateRangeParams();
     api.get('/inventory', {
@@ -156,6 +174,7 @@ export default function Inventory() {
         supplier: supplierFilter || undefined,
         ...dateParams,
       },
+      signal,
     })
       .then((res) => {
         setRecords(res.data?.records || []);
@@ -163,20 +182,25 @@ export default function Inventory() {
         setTotalEntries(res.data?.total || 0);
       })
       .catch((err) => {
+        if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
         toast.error(err.response?.data?.message || 'Failed to load movement logs');
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!signal?.aborted) setLoading(false);
+      });
   }, [page, debouncedSearch, typeFilter, categoryFilter, supplierFilter, getDateRangeParams]);
 
   // Fetch Critical Low Stock Items
   const fetchLowStockAlerts = useCallback(() => {
     api.get('/inventory/low-stock')
       .then((res) => setCriticalAlerts(res.data?.alerts || []))
-      .catch(console.error);
+      .catch((err) => {
+        toast.error(err.response?.data?.message || 'Failed to load low stock alerts');
+      });
   }, []);
 
   // Fetch Current Stock Catalog with pagination
-  const fetchCurrentStock = useCallback(() => {
+  const fetchCurrentStock = useCallback((signal) => {
     setCatalogLoading(true);
     api.get('/inventory/current-stock', {
       params: {
@@ -186,26 +210,32 @@ export default function Inventory() {
         page: catalogPage,
         limit: 25,
       },
+      signal,
     })
       .then((res) => {
         setCurrentStockList(res.data?.products || []);
         setCatalogTotalPages(res.data?.totalPages || 1);
         setCatalogTotalEntries(res.data?.total || 0);
       })
-      .catch(console.error)
-      .finally(() => setCatalogLoading(false));
+      .catch((err) => {
+        if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+        toast.error(err.response?.data?.message || 'Failed to load current stock catalog');
+      })
+      .finally(() => {
+        if (!signal?.aborted) setCatalogLoading(false);
+      });
   }, [debouncedSearch, categoryFilter, catalogStatusFilter, catalogPage]);
 
   // Fetch products for modal selectors
   const fetchProductsForModal = useCallback(() => {
-    api.get('/products', { params: { limit: 150 } })
+    api.get('/products', { params: { limit: 500 } })
       .then((res) => setProductsList(res.data?.products || []))
       .catch(console.error);
   }, []);
 
   // Fetch real suppliers
   const fetchSuppliers = useCallback(() => {
-    api.get('/suppliers')
+    api.get('/suppliers', { params: { limit: 500 } })
       .then((res) => setSuppliersList(res.data?.suppliers || []))
       .catch(() => setSuppliersList([]));
   }, []);
@@ -217,17 +247,24 @@ export default function Inventory() {
       .catch(() => setCategoriesList([]));
   }, []);
 
-  // Initial Data Load & Consolidated Alert Trigger
+  // Initial Data Load
   useEffect(() => {
     fetchStats();
     fetchLowStockAlerts();
     fetchProductsForModal();
     fetchSuppliers();
     fetchCategories();
-
-    // Trigger Section 13 batch threshold alert check
-    api.post('/inventory/batch-check-alerts').catch(() => {});
   }, [fetchStats, fetchLowStockAlerts, fetchProductsForModal, fetchSuppliers, fetchCategories]);
+
+  const closeModal = useCallback(() => {
+    if (submitting) return;
+    setModalMode(null);
+    setForm({ productId: '', supplierId: '', quantity: '', newQuantity: '', unitCost: '', reason: '', reference: '', notes: '' });
+  }, [submitting]);
+
+  const closeProductAudit = useCallback(() => {
+    setAuditModal({ open: false, loading: false, product: null, audit: null, history: [] });
+  }, []);
 
   // Escape key closes open modals
   useEffect(() => {
@@ -239,22 +276,36 @@ export default function Inventory() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [modalMode, auditModal.open]);
+  }, [modalMode, auditModal.open, closeModal, closeProductAudit]);
 
-  // Tab synchronization
-  useEffect(() => {
-    if (activeTab === 'history') {
-      fetchInventory();
-    } else if (activeTab === 'current') {
-      fetchCurrentStock();
-    }
-  }, [activeTab, fetchInventory, fetchCurrentStock]);
-
-  // Search & filter reset page
+  // Reset pagination when debouncedSearch updates
   useEffect(() => {
     setPage(1);
     setCatalogPage(1);
-  }, [debouncedSearch, typeFilter, dateFilter, customStartDate, customEndDate, categoryFilter, supplierFilter, catalogStatusFilter]);
+  }, [debouncedSearch]);
+
+  // Tab synchronization with AbortController
+  useEffect(() => {
+    const controller = new AbortController();
+    if (activeTab === 'history') {
+      fetchInventory(controller.signal);
+    } else if (activeTab === 'current') {
+      fetchCurrentStock(controller.signal);
+    }
+    return () => controller.abort();
+  }, [activeTab, fetchInventory, fetchCurrentStock]);
+
+  // Filtered low-stock alerts for Tab 2 search
+  const filteredAlerts = useMemo(() => {
+    const q = debouncedSearch.trim().toLowerCase();
+    if (!q) return criticalAlerts;
+    return criticalAlerts.filter((item) =>
+      (item.name && item.name.toLowerCase().includes(q)) ||
+      (item.sku && item.sku.toLowerCase().includes(q)) ||
+      (item.category && String(item.category).toLowerCase().includes(q)) ||
+      (item.supplier && String(item.supplier).toLowerCase().includes(q))
+    );
+  }, [criticalAlerts, debouncedSearch]);
 
   // Selected product helper for real-time calculations in modals
   const selectedProduct = useMemo(() => {
@@ -283,10 +334,6 @@ export default function Inventory() {
       });
   };
 
-  const closeProductAudit = () => {
-    setAuditModal({ open: false, loading: false, product: null, audit: null, history: [] });
-  };
-
   // Build clean export query params (removes undefined/null/empty strings)
   const buildExportParams = () => {
     const dateParams = getDateRangeParams();
@@ -313,10 +360,11 @@ export default function Inventory() {
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', `inventory-ledger-${new Date().toISOString().slice(0, 10)}.csv`);
+      link.setAttribute('download', `inventory-ledger-${formatLocalDate(new Date())}.csv`);
       document.body.appendChild(link);
       link.click();
       link.remove();
+      window.URL.revokeObjectURL(url);
       toast.success('Inventory ledger exported to CSV');
     } catch (err) {
       if (err.response?.data instanceof Blob) {
@@ -347,10 +395,11 @@ export default function Inventory() {
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', `inventory-ledger-${new Date().toISOString().slice(0, 10)}.xlsx`);
+      link.setAttribute('download', `inventory-ledger-${formatLocalDate(new Date())}.xlsx`);
       document.body.appendChild(link);
       link.click();
       link.remove();
+      window.URL.revokeObjectURL(url);
       toast.success('Inventory workbook exported to Excel');
     } catch (err) {
       if (err.response?.data instanceof Blob) {
@@ -379,10 +428,11 @@ export default function Inventory() {
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', `inventory-audit-report-${new Date().toISOString().slice(0, 10)}.pdf`);
+      link.setAttribute('download', `inventory-audit-report-${formatLocalDate(new Date())}.pdf`);
       document.body.appendChild(link);
       link.click();
       link.remove();
+      window.URL.revokeObjectURL(url);
       toast.success('Audit report exported to PDF');
     } catch (err) {
       if (err.response?.data instanceof Blob) {
@@ -403,7 +453,9 @@ export default function Inventory() {
 
   // Trigger one-click draft PO replenishment generator
   const handleGenerateDraftPo = async () => {
-    setGeneratingPo(true);
+    if (creatingPo) return;
+    if (!window.confirm('Generate draft Purchase Orders for all low-stock items with assigned suppliers?')) return;
+    setCreatingPo(true);
     try {
       const res = await api.post('/inventory/create-draft-po');
       toast.success(res.data?.message || 'Draft Purchase Orders generated successfully!');
@@ -412,12 +464,22 @@ export default function Inventory() {
     } catch (err) {
       toast.error(err.response?.data?.message || 'Failed to generate draft purchase orders');
     } finally {
-      setGeneratingPo(false);
+      setCreatingPo(false);
     }
   };
 
   // Open Modal with clean form
   const openModal = (mode, defaultProductId = '') => {
+    if (defaultProductId && !productsList.some((p) => p._id === defaultProductId)) {
+      api.get(`/products/${defaultProductId}`)
+        .then((res) => {
+          const prod = res.data?.product;
+          if (prod) {
+            setProductsList((prev) => (prev.some((p) => p._id === prod._id) ? prev : [prod, ...prev]));
+          }
+        })
+        .catch(() => {});
+    }
     setModalMode(mode);
     setForm({
       productId: defaultProductId,
@@ -434,11 +496,6 @@ export default function Inventory() {
       reference: '',
       notes: '',
     });
-  };
-
-  const closeModal = () => {
-    setModalMode(null);
-    setForm({ productId: '', supplierId: '', quantity: '', newQuantity: '', unitCost: '', reason: '', reference: '', notes: '' });
   };
 
   // Submit Modal Action
@@ -499,7 +556,8 @@ export default function Inventory() {
         toast.success(res.data?.message || 'Stock reconciled successfully');
       }
 
-      closeModal();
+      setModalMode(null);
+      setForm({ productId: '', supplierId: '', quantity: '', newQuantity: '', unitCost: '', reason: '', reference: '', notes: '' });
       fetchStats();
       fetchLowStockAlerts();
       fetchProductsForModal();
@@ -718,8 +776,10 @@ export default function Inventory() {
 
       {/* ----------------- Sub-Nav Tabs ----------------- */}
       <div className="inv-tabs-bar">
-        <div className="inv-tabs-list">
+        <div className="inv-tabs-list" role="tablist" aria-label="Inventory views">
           <button
+            role="tab"
+            aria-selected={activeTab === 'history'}
             className={`inv-tab-btn ${activeTab === 'history' ? 'active' : ''}`}
             onClick={() => setActiveTab('history')}
           >
@@ -728,6 +788,8 @@ export default function Inventory() {
             <span className="inv-tab-count">{totalEntries}</span>
           </button>
           <button
+            role="tab"
+            aria-selected={activeTab === 'alerts'}
             className={`inv-tab-btn ${activeTab === 'alerts' ? 'active' : ''}`}
             onClick={() => setActiveTab('alerts')}
           >
@@ -738,17 +800,19 @@ export default function Inventory() {
             </span>
           </button>
           <button
+            role="tab"
+            aria-selected={activeTab === 'current'}
             className={`inv-tab-btn ${activeTab === 'current' ? 'active' : ''}`}
             onClick={() => setActiveTab('current')}
           >
             <FiLayers size={15} />
             Current Stock Levels
-            <span className="inv-tab-count">{stats.totalProductCount || productsList.length || 0}</span>
+            <span className="inv-tab-count">{catalogTotalEntries || stats.totalProductCount || productsList.length || 0}</span>
           </button>
         </div>
 
         {activeTab === 'history' && (
-          <button className="inv-btn inv-btn-secondary inv-btn-sm" onClick={fetchInventory}>
+          <button className="inv-btn inv-btn-secondary inv-btn-sm" onClick={() => fetchInventory()}>
             <FiRefreshCw size={13} />
             Refresh
           </button>
@@ -761,17 +825,28 @@ export default function Inventory() {
           <FiSearch size={16} color="var(--inv-text-muted)" />
           <input
             type="text"
+            aria-label="Search inventory"
             placeholder={
               activeTab === 'current'
                 ? 'Filter catalog by product name or SKU...'
+                : activeTab === 'alerts'
+                ? 'Filter low stock alerts by product, SKU, category, or supplier...'
                 : 'Search SKU, product name, or reference ID...'
             }
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(1);
+              setCatalogPage(1);
+            }}
           />
           {search && (
             <button
-              onClick={() => setSearch('')}
+              onClick={() => {
+                setSearch('');
+                setPage(1);
+                setCatalogPage(1);
+              }}
               aria-label="Clear search"
               style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--inv-text-muted)' }}
             >
@@ -784,8 +859,12 @@ export default function Inventory() {
           <div className="inv-filters-group">
             <select
               className="inv-select"
+              aria-label="Filter by movement vector"
               value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value)}
+              onChange={(e) => {
+                setTypeFilter(e.target.value);
+                setPage(1);
+              }}
             >
               <option value="all">All Vectors</option>
               <option value="opening_stock">Opening Stock</option>
@@ -798,8 +877,13 @@ export default function Inventory() {
             {categoriesList.length > 0 && (
               <select
                 className="inv-select"
+                aria-label="Filter by category"
                 value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
+                onChange={(e) => {
+                  setCategoryFilter(e.target.value);
+                  setPage(1);
+                  setCatalogPage(1);
+                }}
               >
                 <option value="">All Categories</option>
                 {categoriesList.map((cat) => (
@@ -813,8 +897,12 @@ export default function Inventory() {
             {suppliersList.length > 0 && (
               <select
                 className="inv-select"
+                aria-label="Filter by supplier"
                 value={supplierFilter}
-                onChange={(e) => setSupplierFilter(e.target.value)}
+                onChange={(e) => {
+                  setSupplierFilter(e.target.value);
+                  setPage(1);
+                }}
               >
                 <option value="">All Suppliers</option>
                 {suppliersList.map((sup) => (
@@ -827,8 +915,12 @@ export default function Inventory() {
 
             <select
               className="inv-select"
+              aria-label="Filter by date range"
               value={dateFilter}
-              onChange={(e) => setDateFilter(e.target.value)}
+              onChange={(e) => {
+                setDateFilter(e.target.value);
+                setPage(1);
+              }}
             >
               <option value="all">All Time</option>
               <option value="today">Today</option>
@@ -842,16 +934,26 @@ export default function Inventory() {
                 <input
                   type="date"
                   className="inv-date-input"
+                  aria-label="Custom start date"
                   value={customStartDate}
-                  onChange={(e) => setCustomStartDate(e.target.value)}
+                  max={customEndDate || undefined}
+                  onChange={(e) => {
+                    setCustomStartDate(e.target.value);
+                    setPage(1);
+                  }}
                   title="Start Date"
                 />
                 <span style={{ color: 'var(--inv-text-muted)', fontSize: '12px' }}>to</span>
                 <input
                   type="date"
                   className="inv-date-input"
+                  aria-label="Custom end date"
                   value={customEndDate}
-                  onChange={(e) => setCustomEndDate(e.target.value)}
+                  min={customStartDate || undefined}
+                  onChange={(e) => {
+                    setCustomEndDate(e.target.value);
+                    setPage(1);
+                  }}
                   title="End Date"
                 />
               </div>
@@ -864,8 +966,13 @@ export default function Inventory() {
             {categoriesList.length > 0 && (
               <select
                 className="inv-select"
+                aria-label="Filter catalog by category"
                 value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
+                onChange={(e) => {
+                  setCategoryFilter(e.target.value);
+                  setCatalogPage(1);
+                  setPage(1);
+                }}
               >
                 <option value="">All Categories</option>
                 {categoriesList.map((cat) => (
@@ -878,8 +985,12 @@ export default function Inventory() {
 
             <select
               className="inv-select"
+              aria-label="Filter catalog by stock status"
               value={catalogStatusFilter}
-              onChange={(e) => setCatalogStatusFilter(e.target.value)}
+              onChange={(e) => {
+                setCatalogStatusFilter(e.target.value);
+                setCatalogPage(1);
+              }}
             >
               <option value="all">All Stock Statuses</option>
               <option value="in_stock">In Stock</option>
@@ -951,12 +1062,27 @@ export default function Inventory() {
                         <td>
                           <div
                             className="inv-prod-cell inv-clickable-prod"
+                            role="button"
+                            tabIndex={0}
                             onClick={() => openProductAudit(r.product?._id)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                openProductAudit(r.product?._id);
+                              }
+                            }}
                             title="Click to view full forensic stock audit (Section 4)"
                           >
                             <div className="inv-prod-thumb">
                               {r.product?.image ? (
-                                <img src={resolveImageUrl(r.product.image)} alt={r.product.name} />
+                                <img
+                                  src={resolveImageUrl(r.product.image)}
+                                  alt={r.product.name}
+                                  onError={(e) => {
+                                    e.currentTarget.onerror = null;
+                                    e.currentTarget.style.display = 'none';
+                                  }}
+                                />
                               ) : (
                                 r.product?.name?.[0]?.toUpperCase() || 'P'
                               )}
@@ -1074,18 +1200,18 @@ export default function Inventory() {
                 Replenishment Threshold Watchlist
               </h3>
               <p style={{ margin: '2px 0 0 0', fontSize: '12.5px', color: 'var(--inv-text-muted)' }}>
-                {criticalAlerts.length} item{criticalAlerts.length === 1 ? '' : 's'} currently at or below minimum threshold
+                {filteredAlerts.length} item{filteredAlerts.length === 1 ? '' : 's'} currently at or below minimum threshold
               </p>
             </div>
-            {criticalAlerts.length > 0 && (
+            {isAdmin && criticalAlerts.length > 0 && (
               <button
                 className="inv-btn inv-btn-primary inv-btn-sm"
                 onClick={handleGenerateDraftPo}
-                disabled={generatingPo}
+                disabled={creatingPo}
                 title="Automatically create draft POs for all suppliers with low stock items"
               >
                 <FiPackage size={14} />
-                {generatingPo ? 'Generating Draft POs...' : 'Generate Replenishment POs'}
+                {creatingPo ? 'Generating Draft POs...' : 'Generate Replenishment POs'}
               </button>
             )}
           </div>
@@ -1103,28 +1229,49 @@ export default function Inventory() {
                 </tr>
               </thead>
               <tbody>
-                {criticalAlerts.length === 0 ? (
+                {filteredAlerts.length === 0 ? (
                   <tr>
                     <td colSpan={7}>
                       <div className="inv-empty-state">
                         <FiCheckCircle size={36} color="#059669" />
-                        <div style={{ fontWeight: 700, color: 'var(--inv-text-title)' }}>All stock levels are optimal</div>
-                        <div style={{ fontSize: '13px' }}>No products are currently at or below minimum threshold.</div>
+                        <div style={{ fontWeight: 700, color: 'var(--inv-text-title)' }}>
+                          {criticalAlerts.length === 0 ? 'All stock levels are optimal' : 'No matching low-stock alerts'}
+                        </div>
+                        <div style={{ fontSize: '13px' }}>
+                          {criticalAlerts.length === 0
+                            ? 'No products are currently at or below minimum threshold.'
+                            : 'Try clearing your search filter above.'}
+                        </div>
                       </div>
                     </td>
                   </tr>
                 ) : (
-                  criticalAlerts.map((item) => (
+                  filteredAlerts.map((item) => (
                     <tr key={item._id}>
                       <td>
                         <div
                           className="inv-prod-cell inv-clickable-prod"
+                          role="button"
+                          tabIndex={0}
                           onClick={() => openProductAudit(item._id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              openProductAudit(item._id);
+                            }
+                          }}
                           title="Click to view full forensic stock audit (Section 4)"
                         >
                           <div className="inv-prod-thumb">
                             {item.image ? (
-                              <img src={resolveImageUrl(item.image)} alt={item.name} />
+                              <img
+                                src={resolveImageUrl(item.image)}
+                                alt={item.name}
+                                onError={(e) => {
+                                  e.currentTarget.onerror = null;
+                                  e.currentTarget.style.display = 'none';
+                                }}
+                              />
                             ) : (
                               item.name?.[0]?.toUpperCase() || 'P'
                             )}
@@ -1214,12 +1361,27 @@ export default function Inventory() {
                       <td>
                         <div
                           className="inv-prod-cell inv-clickable-prod"
+                          role="button"
+                          tabIndex={0}
                           onClick={() => openProductAudit(p._id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              openProductAudit(p._id);
+                            }
+                          }}
                           title="Click to view full forensic stock audit (Section 4)"
                         >
                           <div className="inv-prod-thumb">
                             {p.image ? (
-                              <img src={resolveImageUrl(p.image)} alt={p.name} />
+                              <img
+                                src={resolveImageUrl(p.image)}
+                                alt={p.name}
+                                onError={(e) => {
+                                  e.currentTarget.onerror = null;
+                                  e.currentTarget.style.display = 'none';
+                                }}
+                              />
                             ) : (
                               p.name?.[0]?.toUpperCase() || 'P'
                             )}
@@ -1233,8 +1395,12 @@ export default function Inventory() {
                       <td>{p.category?.name || 'General'}</td>
                       <td style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{p.stock}</td>
                       <td style={{ fontVariantNumeric: 'tabular-nums' }}>{p.minimumStock}</td>
-                      <td style={{ fontVariantNumeric: 'tabular-nums' }}>${p.cost}</td>
-                      <td style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>${p.stockValue}</td>
+                      <td style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        ${Number(p.cost || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                        ${Number(p.stockValue || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
                       <td>
                         <span
                           className={`inv-kpi-pill ${
@@ -1278,7 +1444,7 @@ export default function Inventory() {
             </table>
           </div>
           {catalogTotalEntries > 25 && (
-            <div className="inv-pagination-bar">
+            <div className="inv-table-footer">
               <div className="inv-pagination-info">
                 Showing {(catalogPage - 1) * 25 + 1} to {Math.min(catalogPage * 25, catalogTotalEntries)} of {catalogTotalEntries} catalog products
               </div>
@@ -1386,7 +1552,7 @@ export default function Inventory() {
       {/* ----------------- Action Modals (With Real Data & Live Calculation) ----------------- */}
       {modalMode && (
         <div className="inv-modal-overlay" onClick={closeModal}>
-          <div className="inv-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="inv-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="inv-modal-header">
               <div className="inv-modal-title">
                 {modalMode === 'adjust' && <><FiSliders color="var(--inv-teal)" /> Reconcile Stock Adjustment</>}
@@ -1394,7 +1560,7 @@ export default function Inventory() {
                 {modalMode === 'out' && <><FiMinus color="var(--inv-indigo)" /> Record Outbound Dispatch</>}
                 {modalMode === 'damaged' && <><FiAlertTriangle color="var(--inv-rose)" /> Record Damaged Goods</>}
               </div>
-              <button className="inv-modal-close" onClick={closeModal} aria-label="Close modal">
+              <button className="inv-modal-close" onClick={closeModal} disabled={submitting} aria-label="Close modal">
                 <FiX />
               </button>
             </div>
@@ -1505,7 +1671,7 @@ export default function Inventory() {
                         step="0.01"
                         min="0"
                         className="inv-form-input"
-                        placeholder={selectedProduct?.cost ? `Current: $${selectedProduct.cost}` : 'e.g. 15.50'}
+                        placeholder={selectedProduct?.cost ? `Current: $${Number(selectedProduct.cost).toFixed(2)}` : 'e.g. 15.50'}
                         value={form.unitCost || ''}
                         onChange={(e) => setForm({ ...form, unitCost: e.target.value })}
                       />
@@ -1656,7 +1822,7 @@ export default function Inventory() {
               </div>
 
               <div className="inv-modal-footer">
-                <button type="button" className="inv-btn inv-btn-secondary" onClick={closeModal}>
+                <button type="button" className="inv-btn inv-btn-secondary" onClick={closeModal} disabled={submitting}>
                   Cancel
                 </button>
                 <button type="submit" className="inv-btn inv-btn-primary" disabled={submitting}>
@@ -1671,7 +1837,7 @@ export default function Inventory() {
       {/* ----------------- Forensic Product Stock Audit Modal (Section 4 Exemplar) ----------------- */}
       {auditModal.open && (
         <div className="inv-modal-overlay" onClick={closeProductAudit}>
-          <div className="inv-modal inv-modal-wide" onClick={(e) => e.stopPropagation()}>
+          <div className="inv-modal inv-modal-wide" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="inv-modal-header">
               <div className="inv-modal-title">
                 <FiActivity color="var(--inv-teal)" size={18} />
@@ -1696,7 +1862,14 @@ export default function Inventory() {
                     <div className="inv-audit-prod-info">
                       <div className="inv-prod-thumb" style={{ width: '48px', height: '48px', fontSize: '18px' }}>
                         {auditModal.product?.image ? (
-                          <img src={resolveImageUrl(auditModal.product.image)} alt={auditModal.product.name} />
+                          <img
+                            src={resolveImageUrl(auditModal.product.image)}
+                            alt={auditModal.product.name}
+                            onError={(e) => {
+                              e.currentTarget.onerror = null;
+                              e.currentTarget.style.display = 'none';
+                            }}
+                          />
                         ) : (
                           auditModal.product?.name?.[0]?.toUpperCase() || 'P'
                         )}
@@ -1708,7 +1881,12 @@ export default function Inventory() {
                           <span>•</span>
                           <span>Category: <strong>{auditModal.product?.category?.name || 'General'}</strong></span>
                           <span>•</span>
-                          <span>Unit Cost: <strong>${auditModal.product?.cost || 0}</strong></span>
+                          <span>
+                            Unit Cost:{' '}
+                            <strong>
+                              ${Number(auditModal.product?.cost || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </strong>
+                          </span>
                         </div>
                       </div>
                     </div>

@@ -2,8 +2,10 @@ import { useState, useEffect, useCallback } from 'react';
 import { FiSearch, FiDownload, FiUserPlus, FiEdit2, FiTrash2, FiEye, FiX, FiMail, FiPhone } from 'react-icons/fi';
 import { toast } from 'react-toastify';
 import api from '../services/api';
+import { useAuth } from '../context/AuthContext';
 import useDebounce from '../hooks/useDebounce';
 import { exportCsv } from '../utils/exportCsv';
+import PageHeader from '../components/PageHeader';
 
 const emptyForm = { name: '', phone: '', email: '', address: '' };
 
@@ -13,16 +15,19 @@ function initials(name = '') {
 
 function StatusBadge({ isActive, totalOrders }) {
   if (!isActive) return <span className="badge badge-muted">Inactive</span>;
-  if (totalOrders === 0) return <span className="badge badge-info">New</span>;
+  if (!totalOrders || totalOrders === 0) return <span className="badge badge-info">New</span>;
   return <span className="badge badge-success">Active</span>;
 }
 
 export default function Customers() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+
   const [customers, setCustomers] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const debouncedSearch = useDebounce(search);
+  const debouncedSearch = useDebounce(search, 350);
   const [statusFilter, setStatusFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -31,6 +36,7 @@ export default function Customers() {
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const [profileCustomer, setProfileCustomer] = useState(null);
   const [purchases, setPurchases] = useState([]);
@@ -38,46 +44,73 @@ export default function Customers() {
 
   const fetchCustomers = useCallback(() => {
     setLoading(true);
-    api.get('/customers', { params: { search: debouncedSearch, page, limit: 10 } })
+    const params = {
+      search: debouncedSearch,
+      page,
+      limit: 10,
+      status: statusFilter !== 'all' ? statusFilter : undefined,
+    };
+    api
+      .get('/customers', { params })
       .then((res) => {
-        setCustomers(res.data.customers);
-        setTotalPages(res.data.totalPages || 1);
+        setCustomers(res.data?.customers || []);
+        setTotalPages(res.data?.totalPages || 1);
       })
       .catch(() => toast.error('Could not load customers'))
       .finally(() => setLoading(false));
-  }, [debouncedSearch, page]);
+  }, [debouncedSearch, page, statusFilter]);
 
   const fetchStats = useCallback(() => {
-    api.get('/customers/stats').then((res) => setStats(res.data.stats)).catch(() => {});
+    api
+      .get('/customers/stats')
+      .then((res) => setStats(res.data?.stats || null))
+      .catch(() => {});
   }, []);
 
-  useEffect(() => { setPage(1); }, [debouncedSearch]);
-  useEffect(() => { fetchCustomers(); }, [fetchCustomers]);
-  useEffect(() => { fetchStats(); }, [fetchStats]);
+  useEffect(() => {
+    fetchCustomers();
+  }, [fetchCustomers]);
 
-  const visibleCustomers = customers.filter((c) => {
-    if (statusFilter === 'active') return c.isActive && c.totalOrders > 0;
-    if (statusFilter === 'new') return c.isActive && c.totalOrders === 0;
-    if (statusFilter === 'inactive') return !c.isActive;
-    return true;
-  });
+  useEffect(() => {
+    fetchStats();
+  }, [fetchStats]);
 
-  const openAdd = () => { setEditingId(null); setForm(emptyForm); setShowForm(true); };
+  const openAdd = () => {
+    setEditingId(null);
+    setForm(emptyForm);
+    setShowForm(true);
+  };
+
   const openEdit = (c) => {
     setEditingId(c._id);
-    setForm({ name: c.name, phone: c.phone || '', email: c.email || '', address: c.address || '' });
+    setForm({
+      name: c.name || '',
+      phone: c.phone || '',
+      email: c.email || '',
+      address: c.address || '',
+    });
     setShowForm(true);
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    const trimmedName = form.name.trim();
+    if (!trimmedName) {
+      return toast.error('Customer name is required');
+    }
+    const payload = {
+      name: trimmedName,
+      phone: form.phone.trim(),
+      email: form.email.trim(),
+      address: form.address.trim(),
+    };
     setSaving(true);
     try {
       if (editingId) {
-        await api.put(`/customers/${editingId}`, form);
+        await api.put(`/customers/${editingId}`, payload);
         toast.success('Customer updated');
       } else {
-        await api.post('/customers', form);
+        await api.post('/customers', payload);
         toast.success('Customer added');
       }
       setShowForm(false);
@@ -95,7 +128,11 @@ export default function Customers() {
     try {
       await api.delete(`/customers/${customer._id}`);
       toast.success('Customer removed');
-      fetchCustomers();
+      if (customers.length === 1 && page > 1) {
+        setPage((p) => p - 1);
+      } else {
+        fetchCustomers();
+      }
       fetchStats();
     } catch (err) {
       toast.error(err.response?.data?.message || 'Could not remove customer');
@@ -104,55 +141,89 @@ export default function Customers() {
 
   const openProfile = (customer) => {
     setProfileCustomer(customer);
+    setPurchases([]);
     setPurchasesLoading(true);
-    api.get(`/customers/${customer._id}/purchases`)
-      .then((res) => setPurchases(res.data.sales))
-      .catch(() => toast.error('Could not load purchase history'))
+    Promise.all([
+      api.get(`/customers/${customer._id}`),
+      api.get(`/customers/${customer._id}/purchases`),
+    ])
+      .then(([detailRes, purchaseRes]) => {
+        if (detailRes.data?.customer) {
+          setProfileCustomer(detailRes.data.customer);
+        }
+        setPurchases(purchaseRes.data?.sales || []);
+      })
+      .catch(() => {
+        setPurchases([]);
+        toast.error('Could not load purchase history');
+      })
       .finally(() => setPurchasesLoading(false));
   };
 
-  const handleExport = () => {
-    if (visibleCustomers.length === 0) return toast.info('No customers to export');
-    exportCsv('customers.csv', visibleCustomers, {
-      Name: (c) => c.name,
-      Phone: (c) => c.phone,
-      Email: (c) => c.email,
-      Address: (c) => c.address,
-      'Total Orders': (c) => c.totalOrders,
-      'Total Spending': (c) => c.totalSpending?.toFixed(2),
-      Status: (c) => (c.isActive ? 'Active' : 'Inactive'),
-    });
+  const handleExport = async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const params = {
+        search: debouncedSearch,
+        page: 1,
+        limit: 5000,
+        status: statusFilter !== 'all' ? statusFilter : undefined,
+      };
+      const res = await api.get('/customers', { params });
+      const rows = res.data?.customers || [];
+      if (rows.length === 0) return toast.info('No customers to export');
+      exportCsv('customers.csv', rows, {
+        Name: (c) => c.name || '',
+        Phone: (c) => c.phone || '',
+        Email: (c) => c.email || '',
+        Address: (c) => c.address || '',
+        'Total Orders': (c) => Number(c.totalOrders || 0),
+        'Total Spending': (c) => Number(c.totalSpending || 0).toFixed(2),
+        Status: (c) => (c.isActive ? 'Active' : 'Inactive'),
+      });
+    } catch {
+      toast.error('Failed to export customers');
+    } finally {
+      setExporting(false);
+    }
   };
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>Customer Relationship Management</h1>
-          <p className="page-subtitle">Manage your client base, track purchase history, and total spending.</p>
-        </div>
-        <div style={{ display: 'flex', gap: 10 }}>
-          <button className="btn btn-secondary" onClick={handleExport}><FiDownload /> Export CSV</button>
-          <button className="btn btn-primary" onClick={openAdd}><FiUserPlus /> Add Customer</button>
-        </div>
-      </div>
+      <PageHeader
+        title="Customer Relationship Management"
+        subtitle="Manage your client base, track purchase history, and total spending."
+        actions={
+          <>
+            <button className="btn btn-secondary" onClick={handleExport} disabled={exporting}>
+              <FiDownload /> {exporting ? 'Exporting...' : 'Export CSV'}
+            </button>
+            <button className="btn btn-primary" onClick={openAdd}>
+              <FiUserPlus /> Add Customer
+            </button>
+          </>
+        }
+      />
 
       <div className="stat-grid">
         <div className="stat-card">
           <span className="stat-label">Total Customers</span>
-          <span className="stat-value">{stats ? stats.total.toLocaleString() : '—'}</span>
+          <span className="stat-value">{stats ? (stats.total ?? 0).toLocaleString() : '—'}</span>
         </div>
         <div className="stat-card">
           <span className="stat-label">Active Customers</span>
-          <span className="stat-value">{stats ? stats.active.toLocaleString() : '—'}</span>
+          <span className="stat-value">{stats ? (stats.active ?? 0).toLocaleString() : '—'}</span>
         </div>
         <div className="stat-card">
           <span className="stat-label">New This Month</span>
-          <span className="stat-value">{stats ? stats.newThisMonth.toLocaleString() : '—'}</span>
+          <span className="stat-value">{stats ? (stats.newThisMonth ?? 0).toLocaleString() : '—'}</span>
         </div>
         <div className="stat-card">
           <span className="stat-label">Lifetime Value</span>
-          <span className="stat-value">${stats ? stats.totalLifetimeValue.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}</span>
+          <span className="stat-value">
+            ${stats ? Number(stats.totalLifetimeValue || 0).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}
+          </span>
         </div>
       </div>
 
@@ -162,11 +233,21 @@ export default function Customers() {
           <input
             placeholder="Search by name, phone, or email..."
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(1);
+            }}
             style={{ paddingLeft: 36 }}
           />
         </div>
-        <select className="filter-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+        <select
+          className="filter-select"
+          value={statusFilter}
+          onChange={(e) => {
+            setStatusFilter(e.target.value);
+            setPage(1);
+          }}
+        >
           <option value="all">Status: All</option>
           <option value="active">Active</option>
           <option value="new">New</option>
@@ -189,16 +270,16 @@ export default function Customers() {
           <tbody>
             {loading ? (
               <tr><td colSpan="6" className="loading">Loading customers...</td></tr>
-            ) : visibleCustomers.length === 0 ? (
+            ) : customers.length === 0 ? (
               <tr><td colSpan="6" className="empty-state">No customers match your search.</td></tr>
-            ) : visibleCustomers.map((c) => (
+            ) : customers.map((c) => (
               <tr key={c._id}>
                 <td>
                   <div className="profile-cell">
                     <span className="avatar">{initials(c.name)}</span>
                     <div>
                       <div className="profile-name">{c.name}</div>
-                      <div className="profile-meta">{c._id.slice(-6).toUpperCase()}</div>
+                      <div className="profile-meta">{(c._id || '').slice(-6).toUpperCase()}</div>
                     </div>
                   </div>
                 </td>
@@ -209,13 +290,15 @@ export default function Customers() {
                   </div>
                 </td>
                 <td><StatusBadge isActive={c.isActive} totalOrders={c.totalOrders} /></td>
-                <td>{c.totalOrders}</td>
-                <td>${c.totalSpending?.toFixed(2)}</td>
+                <td>{Number(c.totalOrders || 0)}</td>
+                <td>${Number(c.totalSpending || 0).toFixed(2)}</td>
                 <td>
                   <div className="row-actions">
                     <button className="icon-btn" title="View profile" onClick={() => openProfile(c)}><FiEye /></button>
                     <button className="icon-btn" title="Edit" onClick={() => openEdit(c)}><FiEdit2 /></button>
-                    <button className="icon-btn icon-btn-danger" title="Remove" onClick={() => handleDelete(c)}><FiTrash2 /></button>
+                    {isAdmin && (
+                      <button className="icon-btn icon-btn-danger" title="Remove" onClick={() => handleDelete(c)}><FiTrash2 /></button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -281,11 +364,11 @@ export default function Customers() {
             <div className="stat-grid stat-grid-compact">
               <div className="stat-card">
                 <span className="stat-label">Total Orders</span>
-                <span className="stat-value">{profileCustomer.totalOrders}</span>
+                <span className="stat-value">{Number(profileCustomer.totalOrders || 0)}</span>
               </div>
               <div className="stat-card">
                 <span className="stat-label">Total Spending</span>
-                <span className="stat-value">${profileCustomer.totalSpending?.toFixed(2)}</span>
+                <span className="stat-value">${Number(profileCustomer.totalSpending || 0).toFixed(2)}</span>
               </div>
               <div className="stat-card">
                 <span className="stat-label">Address</span>
@@ -307,9 +390,9 @@ export default function Customers() {
                   <tr key={sale._id}>
                     <td>{sale.invoiceNumber}</td>
                     <td>{new Date(sale.createdAt).toLocaleDateString()}</td>
-                    <td>{sale.items.length}</td>
+                    <td>{(sale.items || []).length}</td>
                     <td style={{ textTransform: 'capitalize' }}>{sale.paymentMethod}</td>
-                    <td>${sale.total.toFixed(2)}</td>
+                    <td>${Number(sale.total || 0).toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>

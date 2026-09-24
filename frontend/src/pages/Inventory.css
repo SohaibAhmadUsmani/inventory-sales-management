@@ -1053,11 +1053,18 @@
   transition: background 150ms ease;
 }
 
-.inv-clickable-prod:hover {
+.inv-clickable-prod:hover,
+.inv-clickable-prod:focus-visible {
   background: #f0fdfa;
+  outline: none;
 }
 
-.inv-clickable-prod:hover .inv-prod-name {
+.inv-clickable-prod:focus-visible {
+  box-shadow: 0 0 0 2px var(--inv-teal);
+}
+
+.inv-clickable-prod:hover .inv-prod-name,
+.inv-clickable-prod:focus-visible .inv-prod-name {
   color: var(--inv-teal-dark);
   text-decoration: underline;
 }
@@ -1305,7 +1312,7 @@
 
 @media (max-width: 768px) {
   .inv-container {
-    padding: 16px;
+    padding: 0;
   }
 
   .inv-kpi-grid {

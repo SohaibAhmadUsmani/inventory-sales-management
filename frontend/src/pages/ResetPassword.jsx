@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import api from '../services/api';
 import { toast } from 'react-toastify';
-import { FiBox, FiLock, FiEye, FiEyeOff, FiArrowLeft, FiAlertCircle, FiCheckCircle } from 'react-icons/fi';
+import { FiBox, FiLock, FiEye, FiEyeOff, FiArrowLeft, FiAlertCircle } from 'react-icons/fi';
 import loginBg from '../assets/login background.mp4';
 import './Auth.css';
 
@@ -18,8 +18,13 @@ export default function ResetPassword() {
   const videoRef = useRef(null);
 
   useEffect(() => {
+    const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
     if (videoRef.current) {
-      videoRef.current.playbackRate = 0.7;
+      if (prefersReducedMotion) {
+        videoRef.current.pause();
+      } else {
+        videoRef.current.playbackRate = 0.7;
+      }
     }
   }, []);
 
@@ -38,7 +43,7 @@ export default function ResetPassword() {
     try {
       await api.post(`/auth/reset-password/${token}`, { password });
       toast.success('Password reset successful. You can now log in.');
-      navigate('/login');
+      navigate('/login', { replace: true });
     } catch (err) {
       setError(err.response?.data?.message || 'Password reset failed. The link may have expired.');
     } finally {
@@ -55,6 +60,7 @@ export default function ResetPassword() {
         muted
         loop
         playsInline
+        aria-hidden="true"
         src={loginBg}
       />
       <div className="auth-bg-overlay" />
@@ -100,7 +106,7 @@ export default function ResetPassword() {
 
           <form className="auth-form" onSubmit={handleSubmit}>
             {error && (
-              <div className="auth-error" key={error}>
+              <div className="auth-error" key={error} role="alert" aria-live="assertive">
                 <span className="auth-error-icon">
                   <FiAlertCircle size={16} />
                 </span>
@@ -130,7 +136,6 @@ export default function ResetPassword() {
                   type="button"
                   className="auth-eye-btn"
                   onClick={() => setShowPassword(!showPassword)}
-                  tabIndex={-1}
                   aria-label={showPassword ? 'Hide password' : 'Show password'}
                 >
                   {showPassword ? <FiEyeOff size={16} /> : <FiEye size={16} />}
@@ -160,7 +165,6 @@ export default function ResetPassword() {
                   type="button"
                   className="auth-eye-btn"
                   onClick={() => setShowConfirm(!showConfirm)}
-                  tabIndex={-1}
                   aria-label={showConfirm ? 'Hide password' : 'Show password'}
                 >
                   {showConfirm ? <FiEyeOff size={16} /> : <FiEye size={16} />}

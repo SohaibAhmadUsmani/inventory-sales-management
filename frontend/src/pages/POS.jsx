@@ -23,7 +23,7 @@ const loadFromStorage = (key, fallback) => {
 
 const resolveImageUrl = (imagePath) => {
   if (!imagePath) return '';
-  if (/^https?:\/\//i.test(imagePath)) return imagePath;
+  if (/^(https?:|blob:|data:)/i.test(imagePath)) return imagePath;
   const base = (import.meta.env.VITE_API_URL || '/api').replace(/\/api\/?$/, '');
   const normalized = imagePath.replace(/\\/g, '/').replace(/^\/?uploads\/?/, '');
   return `${base}/uploads/${normalized}`;
@@ -31,11 +31,14 @@ const resolveImageUrl = (imagePath) => {
 
 export default function POS() {
   const [products, setProducts] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [selectedCategory, setSelectedCategory] = useState('');
   const [productsLoading, setProductsLoading] = useState(true);
   const [productsError, setProductsError] = useState(null);
   const [search, setSearch] = useState('');
 
   const [cart, setCart] = useState(() => loadFromStorage(CART_KEY, []));
+  const [qtyDrafts, setQtyDrafts] = useState({});
   const [discount, setDiscount] = useState(() => {
     const value = Number(loadFromStorage(DISCOUNT_KEY, 0));
     return value >= 0 ? value : 0;
@@ -48,12 +51,17 @@ export default function POS() {
     const stored = loadFromStorage(PAYMENT_KEY, 'cash');
     return ['cash', 'card', 'online'].includes(stored) ? stored : 'cash';
   });
+  const [paymentStatus, setPaymentStatus] = useState('paid');
+  const [notes, setNotes] = useState('');
 
   const [customer, setCustomer] = useState(() => loadFromStorage(CUSTOMER_KEY, null));
   const [customerOpen, setCustomerOpen] = useState(false);
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLoading, setCustomerLoading] = useState(false);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [quickAddForm, setQuickAddForm] = useState({ name: '', phone: '', email: '' });
+  const [quickAddSaving, setQuickAddSaving] = useState(false);
 
   const [heldOrders, setHeldOrders] = useState(() => loadFromStorage(HELD_KEY, []));
   const [heldOpen, setHeldOpen] = useState(false);
@@ -62,28 +70,58 @@ export default function POS() {
   const searchTimer = useRef(null);
   const customerTimer = useRef(null);
   const firstSearch = useRef(true);
+  const customerDropdownRef = useRef(null);
 
-  const loadProducts = useCallback((query) => {
+  useEffect(() => {
+    api
+      .get('/categories')
+      .then((res) => setCategories(res.data?.categories || []))
+      .catch(() => {});
+  }, []);
+
+  const loadProducts = useCallback((query, categoryId = selectedCategory) => {
     setProductsLoading(true);
     setProductsError(null);
+    const params = { search: query, limit: 200 };
+    if (categoryId) params.category = categoryId;
     return api
-      .get('/products', { params: { search: query, limit: 50 } })
-      .then((res) => setProducts(res.data.products || []))
+      .get('/products', { params })
+      .then((res) => {
+        const loaded = res.data?.products || [];
+        setProducts(loaded);
+        if (loaded.length > 0) {
+          setCart((prev) =>
+            prev.map((item) => {
+              const fresh = loaded.find((p) => p._id === item.productId);
+              if (!fresh) return item;
+              const freshStock = Number(fresh.stock) || 0;
+              return {
+                ...item,
+                name: fresh.name,
+                sku: fresh.sku,
+                price: fresh.price,
+                stock: freshStock,
+                quantity: freshStock > 0 ? Math.min(item.quantity, freshStock) : item.quantity,
+              };
+            })
+          );
+        }
+      })
       .catch((err) =>
         setProductsError(err.response?.data?.message || 'Failed to load products')
       )
       .finally(() => setProductsLoading(false));
-  }, []);
+  }, [selectedCategory]);
 
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(
-      () => loadProducts(search),
+      () => loadProducts(search, selectedCategory),
       firstSearch.current ? 0 : 300
     );
     firstSearch.current = false;
     return () => clearTimeout(searchTimer.current);
-  }, [search, loadProducts]);
+  }, [search, selectedCategory, loadProducts]);
 
   useEffect(() => {
     localStorage.setItem(CART_KEY, JSON.stringify(cart));
@@ -112,12 +150,34 @@ export default function POS() {
 
   useEffect(() => {
     if (!customerOpen) return;
+    const handleMouseDown = (e) => {
+      if (customerDropdownRef.current && !customerDropdownRef.current.contains(e.target)) {
+        setCustomerOpen(false);
+        setQuickAddOpen(false);
+      }
+    };
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setCustomerOpen(false);
+        setQuickAddOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleMouseDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [customerOpen]);
+
+  useEffect(() => {
+    if (!customerOpen) return;
     if (customerTimer.current) clearTimeout(customerTimer.current);
     customerTimer.current = setTimeout(() => {
       setCustomerLoading(true);
       api
-        .get('/customers', { params: { search: customerSearch, limit: 6 } })
-        .then((res) => setCustomerResults(res.data.customers || []))
+        .get('/customers', { params: { search: customerSearch, limit: 8 } })
+        .then((res) => setCustomerResults(res.data?.customers || []))
         .catch(() => setCustomerResults([]))
         .finally(() => setCustomerLoading(false));
     }, 250);
@@ -127,12 +187,38 @@ export default function POS() {
   const selectCustomer = (c) => {
     setCustomer(c);
     setCustomerOpen(false);
+    setQuickAddOpen(false);
     setCustomerSearch('');
     setCustomerResults([]);
   };
 
+  const handleQuickAddCustomer = async (e) => {
+    e.preventDefault();
+    if (!quickAddForm.name.trim()) {
+      return toast.error('Customer name is required');
+    }
+    setQuickAddSaving(true);
+    try {
+      const res = await api.post('/customers', {
+        name: quickAddForm.name.trim(),
+        phone: quickAddForm.phone.trim(),
+        email: quickAddForm.email.trim(),
+      });
+      const created = res.data?.customer;
+      if (created) {
+        selectCustomer(created);
+        setQuickAddForm({ name: '', phone: '', email: '' });
+        toast.success(`Customer "${created.name}" added and selected`);
+      }
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to add customer');
+    } finally {
+      setQuickAddSaving(false);
+    }
+  };
+
   const addToCart = (product) => {
-    const stock = Number(product.stock);
+    const stock = Number(product.stock) || 0;
     setCart((prev) => {
       const existing = prev.find((i) => i.productId === product._id);
       const currentQty = existing ? existing.quantity : 0;
@@ -142,7 +228,9 @@ export default function POS() {
       }
       if (existing) {
         return prev.map((i) =>
-          i.productId === product._id ? { ...i, quantity: i.quantity + 1 } : i
+          i.productId === product._id
+            ? { ...i, quantity: i.quantity + 1, stock, price: product.price }
+            : i
         );
       }
       return [
@@ -164,7 +252,7 @@ export default function POS() {
     if (!item) return;
     if (qty < 1) return removeFromCart(productId);
     const itemStock = Number(item.stock) || 0;
-    if (itemStock > 0 && qty > itemStock) {
+    if (qty > itemStock) {
       return toast.error(`Insufficient stock for ${item.name} (max ${itemStock})`);
     }
     setCart((prev) =>
@@ -174,21 +262,62 @@ export default function POS() {
 
   const handleQtyChange = (item, e) => {
     const value = e.target.value;
-    if (value === '') return;
+    if (value === '') {
+      setQtyDrafts((prev) => ({ ...prev, [item.productId]: '' }));
+      return;
+    }
     if (!/^\d+$/.test(value)) return;
+    setQtyDrafts((prev) => ({ ...prev, [item.productId]: value }));
     const qty = parseInt(value, 10);
-    if (Number.isNaN(qty)) return;
+    if (Number.isNaN(qty) || qty < 1) return;
+    const itemStock = Number(item.stock) || 0;
+    if (qty > itemStock) {
+      toast.error(`Insufficient stock for ${item.name} (max ${itemStock})`);
+      const clamped = Math.max(1, itemStock);
+      setQtyDrafts((prev) => ({ ...prev, [item.productId]: String(clamped) }));
+      if (itemStock >= 1) updateQuantity(item.productId, clamped);
+      return;
+    }
     updateQuantity(item.productId, qty);
   };
 
-  const removeFromCart = (productId) =>
+  const handleQtyBlur = (item) => {
+    const draft = qtyDrafts[item.productId];
+    setQtyDrafts((prev) => {
+      const next = { ...prev };
+      delete next[item.productId];
+      return next;
+    });
+    if (draft === undefined) return;
+    const parsed = parseInt(draft, 10);
+    const maxStock = Math.max(1, Number(item.stock) || 1);
+    const clamped = Number.isNaN(parsed) || parsed < 1 ? 1 : Math.min(parsed, maxStock);
+    if (clamped !== item.quantity) {
+      updateQuantity(item.productId, clamped);
+    }
+  };
+
+  const removeFromCart = (productId) => {
+    setQtyDrafts((prev) => {
+      const next = { ...prev };
+      delete next[productId];
+      return next;
+    });
     setCart((prev) => prev.filter((item) => item.productId !== productId));
+  };
 
   const subtotal = cart.reduce(
     (sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0),
     0
   );
-  const total = subtotal - Number(discount || 0) + Number(tax || 0);
+
+  useEffect(() => {
+    if (discount > subtotal) {
+      setDiscount(subtotal);
+    }
+  }, [subtotal, discount]);
+
+  const total = Math.max(0, subtotal - Number(discount || 0) + Number(tax || 0));
 
   const handleDiscountChange = (e) => {
     const value = e.target.value;
@@ -232,25 +361,44 @@ export default function POS() {
       discount: Number(discount),
       tax: Number(tax),
       paymentMethod,
+      paymentStatus,
+      notes,
       customer,
     };
     setHeldOrders((prev) => [...prev, heldOrder]);
     setCart([]);
+    setQtyDrafts({});
     setDiscount(0);
     setTax(0);
+    setPaymentStatus('paid');
+    setNotes('');
     setCustomer(null);
     toast.success('Order held');
   };
 
   const resumeOrder = (order) => {
+    if (
+      cart.length > 0 &&
+      !window.confirm('Replace current cart items with this held order?')
+    ) {
+      return;
+    }
     setCart(order.cart || []);
+    setQtyDrafts({});
     setDiscount(Number(order.discount) || 0);
     setTax(Number(order.tax) || 0);
     if (['cash', 'card', 'online'].includes(order.paymentMethod)) {
       setPaymentMethod(order.paymentMethod);
     }
+    if (['paid', 'pending', 'partial'].includes(order.paymentStatus)) {
+      setPaymentStatus(order.paymentStatus);
+    } else {
+      setPaymentStatus('paid');
+    }
+    setNotes(order.notes || '');
     setCustomer(order.customer || null);
     deleteHeld(order.id);
+    setHeldOpen(false);
     toast.success('Order resumed');
   };
 
@@ -268,7 +416,8 @@ export default function POS() {
       discount: Number(discount),
       tax: Number(tax),
       paymentMethod,
-      paymentStatus: 'paid',
+      paymentStatus,
+      ...(notes.trim() ? { notes: notes.trim() } : {}),
       ...(customer?._id ? { customerId: customer._id } : {}),
     };
     setChecking(true);
@@ -276,10 +425,14 @@ export default function POS() {
       const res = await api.post('/sales', saleData);
       toast.success(`Sale completed! Invoice: ${res.data.sale.invoiceNumber}`);
       setCart([]);
+      setQtyDrafts({});
       setDiscount(0);
       setTax(0);
+      setPaymentStatus('paid');
+      setNotes('');
       setCustomer(null);
-      loadProducts(search);
+      window.dispatchEvent(new Event('notifications-updated'));
+      loadProducts(search, selectedCategory);
     } catch (err) {
       toast.error(err.response?.data?.message || 'Sale failed');
     } finally {
@@ -290,7 +443,19 @@ export default function POS() {
   const paymentMethods = ['cash', 'card', 'online'];
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: 20 }}>
+    <div className="pos-layout">
+      <style>{`
+        .pos-layout {
+          display: grid;
+          grid-template-columns: 1fr 380px;
+          gap: 20px;
+        }
+        @media (max-width: 960px) {
+          .pos-layout {
+            grid-template-columns: 1fr;
+          }
+        }
+      `}</style>
       <div>
         <PageHeader
           title="POS"
@@ -311,11 +476,56 @@ export default function POS() {
             padding: '12px 16px',
             border: '1px solid var(--border)',
             borderRadius: 8,
-            marginBottom: 16,
+            marginBottom: 12,
             fontSize: 16,
             outline: 'none',
           }}
         />
+
+        {categories.length > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              gap: 8,
+              flexWrap: 'wrap',
+              marginBottom: 16,
+            }}
+          >
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setSelectedCategory('')}
+              style={{
+                padding: '6px 14px',
+                fontSize: 13,
+                borderRadius: 20,
+                background: selectedCategory === '' ? 'var(--primary)' : 'var(--card-bg)',
+                color: selectedCategory === '' ? '#fff' : 'var(--text)',
+                border: '1px solid var(--border)',
+              }}
+            >
+              All Categories
+            </button>
+            {categories.map((cat) => (
+              <button
+                key={cat._id}
+                type="button"
+                className="btn"
+                onClick={() => setSelectedCategory(cat._id)}
+                style={{
+                  padding: '6px 14px',
+                  fontSize: 13,
+                  borderRadius: 20,
+                  background: selectedCategory === cat._id ? 'var(--primary)' : 'var(--card-bg)',
+                  color: selectedCategory === cat._id ? '#fff' : 'var(--text)',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                {cat.name}
+              </button>
+            ))}
+          </div>
+        )}
 
         {productsLoading ? (
           <div className="loading">Loading products...</div>
@@ -325,7 +535,10 @@ export default function POS() {
             style={{ textAlign: 'center', color: 'var(--danger)', padding: 24 }}
           >
             <p style={{ marginBottom: 12 }}>{productsError}</p>
-            <button className="btn btn-secondary" onClick={() => loadProducts(search)}>
+            <button
+              className="btn btn-secondary"
+              onClick={() => loadProducts(search, selectedCategory)}
+            >
               Retry
             </button>
           </div>
@@ -348,7 +561,16 @@ export default function POS() {
                 <div
                   key={p._id}
                   className="card"
+                  role="button"
+                  tabIndex={outOfStock ? -1 : 0}
+                  aria-disabled={outOfStock}
                   onClick={() => addToCart(p)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      addToCart(p);
+                    }
+                  }}
                   style={{
                     cursor: outOfStock ? 'not-allowed' : 'pointer',
                     padding: 16,
@@ -368,7 +590,7 @@ export default function POS() {
                   {p.image ? (
                     <img
                       src={resolveImageUrl(p.image)}
-                      alt={p.name}
+                      alt={p.name || 'Product'}
                       style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 6, marginBottom: 8 }}
                     />
                   ) : (
@@ -387,13 +609,13 @@ export default function POS() {
                         fontSize: 20,
                       }}
                     >
-                      {p.name.charAt(0).toUpperCase()}
+                      {(p.name || '?').charAt(0).toUpperCase()}
                     </div>
                   )}
                   <div style={{ fontWeight: 600, marginBottom: 4 }}>{p.name}</div>
                   <div style={{ color: 'var(--text-light)', fontSize: 13 }}>{p.sku}</div>
                   <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--primary)', marginTop: 8 }}>
-                    ${Number(p.price).toFixed(2)}
+                    ${Number(p.price || 0).toFixed(2)}
                   </div>
                   <div
                     style={{
@@ -416,115 +638,181 @@ export default function POS() {
 
         <div className="form-group">
           <label>Customer</label>
-          {customer ? (
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '10px 12px',
-                border: '1px solid var(--border)',
-                borderRadius: 8,
-              }}
-            >
-              <div>
-                <div style={{ fontWeight: 500 }}>{customer.name}</div>
-                {customer.phone && (
-                  <div style={{ fontSize: 12, color: 'var(--text-light)' }}>{customer.phone}</div>
-                )}
+          <div style={{ position: 'relative' }} ref={customerDropdownRef}>
+            {customer ? (
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  padding: '10px 12px',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                }}
+              >
+                <div>
+                  <div style={{ fontWeight: 500 }}>{customer.name}</div>
+                  {customer.phone && (
+                    <div style={{ fontSize: 12, color: 'var(--text-light)' }}>{customer.phone}</div>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ padding: '4px 10px', fontSize: 12 }}
+                    onClick={() => setCustomerOpen((v) => !v)}
+                  >
+                    {customerOpen ? 'Close' : 'Change'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ padding: '4px 10px', fontSize: 12 }}
+                    onClick={() => {
+                      setCustomer(null);
+                      setCustomerOpen(false);
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  className="btn btn-secondary"
-                  style={{ padding: '4px 10px', fontSize: 12 }}
-                  onClick={() => setCustomerOpen((v) => !v)}
-                >
-                  Change
-                </button>
-                <button
-                  className="btn btn-secondary"
-                  style={{ padding: '4px 10px', fontSize: 12 }}
-                  onClick={() => setCustomer(null)}
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div style={{ position: 'relative' }}>
+            ) : (
               <button
+                type="button"
                 className="btn btn-secondary"
                 style={{ width: '100%' }}
                 onClick={() => setCustomerOpen((v) => !v)}
               >
                 {customerOpen ? 'Close search' : '+ Select customer (optional)'}
               </button>
-              {customerOpen && (
-                <div
+            )}
+
+            {customerOpen && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  zIndex: 50,
+                  background: '#fff',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+                  marginTop: 4,
+                  maxHeight: 340,
+                  overflow: 'auto',
+                }}
+              >
+                <input
+                  autoFocus
+                  placeholder="Search by name, phone, email..."
+                  value={customerSearch}
+                  onChange={(e) => setCustomerSearch(e.target.value)}
                   style={{
-                    position: 'absolute',
-                    top: '100%',
-                    left: 0,
-                    right: 0,
-                    zIndex: 50,
-                    background: '#fff',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
-                    marginTop: 4,
-                    maxHeight: 280,
-                    overflow: 'auto',
+                    width: '100%',
+                    padding: '10px 12px',
+                    border: 'none',
+                    borderBottom: '1px solid var(--border)',
+                    outline: 'none',
                   }}
-                >
-                  <input
-                    autoFocus
-                    placeholder="Search by name, phone, email..."
-                    value={customerSearch}
-                    onChange={(e) => setCustomerSearch(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '10px 12px',
-                      border: 'none',
-                      borderBottom: '1px solid var(--border)',
-                      outline: 'none',
-                    }}
-                  />
-                  {customerLoading ? (
-                    <div style={{ padding: 12, fontSize: 13, color: 'var(--text-light)' }}>
-                      Searching...
-                    </div>
-                  ) : customerResults.length === 0 ? (
-                    <div style={{ padding: 12, fontSize: 13, color: 'var(--text-light)' }}>
-                      No customers found
-                    </div>
+                />
+                {customerLoading ? (
+                  <div style={{ padding: 12, fontSize: 13, color: 'var(--text-light)' }}>
+                    Searching...
+                  </div>
+                ) : customerResults.length === 0 ? (
+                  <div style={{ padding: 12, fontSize: 13, color: 'var(--text-light)' }}>
+                    No customers found
+                  </div>
+                ) : (
+                  customerResults.map((c) => (
+                    <button
+                      key={c._id}
+                      type="button"
+                      onClick={() => selectCustomer(c)}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'left',
+                        padding: '10px 12px',
+                        border: 'none',
+                        borderBottom: '1px solid var(--border)',
+                        background: customer?._id === c._id ? 'var(--bg)' : 'transparent',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <div style={{ fontWeight: 500 }}>{c.name}</div>
+                      <div style={{ fontSize: 12, color: 'var(--text-light)' }}>
+                        {[c.phone, c.email].filter(Boolean).join(' • ')}
+                      </div>
+                    </button>
+                  ))
+                )}
+
+                <div style={{ padding: 10, borderTop: '1px solid var(--border)', background: 'var(--bg)' }}>
+                  {!quickAddOpen ? (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: '100%', padding: '6px 10px', fontSize: 12 }}
+                      onClick={() => {
+                        setQuickAddOpen(true);
+                        if (customerSearch && !quickAddForm.name) {
+                          setQuickAddForm((f) => ({ ...f, name: customerSearch }));
+                        }
+                      }}
+                    >
+                      + Quick Add New Customer
+                    </button>
                   ) : (
-                    customerResults.map((c) => (
-                      <button
-                        key={c._id}
-                        type="button"
-                        onClick={() => selectCustomer(c)}
-                        style={{
-                          display: 'block',
-                          width: '100%',
-                          textAlign: 'left',
-                          padding: '10px 12px',
-                          border: 'none',
-                          borderBottom: '1px solid var(--border)',
-                          background: 'transparent',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <div style={{ fontWeight: 500 }}>{c.name}</div>
-                        <div style={{ fontSize: 12, color: 'var(--text-light)' }}>
-                          {[c.phone, c.email].filter(Boolean).join(' • ')}
-                        </div>
-                      </button>
-                    ))
+                    <form onSubmit={handleQuickAddCustomer} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <input
+                        placeholder="Customer Name *"
+                        value={quickAddForm.name}
+                        onChange={(e) => setQuickAddForm({ ...quickAddForm, name: e.target.value })}
+                        required
+                        style={{ padding: '6px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6 }}
+                      />
+                      <input
+                        placeholder="Phone (optional)"
+                        value={quickAddForm.phone}
+                        onChange={(e) => setQuickAddForm({ ...quickAddForm, phone: e.target.value })}
+                        style={{ padding: '6px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6 }}
+                      />
+                      <input
+                        type="email"
+                        placeholder="Email (optional)"
+                        value={quickAddForm.email}
+                        onChange={(e) => setQuickAddForm({ ...quickAddForm, email: e.target.value })}
+                        style={{ padding: '6px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6 }}
+                      />
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ flex: 1, padding: '6px', fontSize: 12 }}
+                          onClick={() => setQuickAddOpen(false)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="btn btn-primary"
+                          style={{ flex: 1, padding: '6px', fontSize: 12 }}
+                          disabled={quickAddSaving}
+                        >
+                          {quickAddSaving ? 'Saving...' : 'Save & Select'}
+                        </button>
+                      </div>
+                    </form>
                   )}
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            )}
+          </div>
         </div>
 
         <div style={{ flex: 1, overflow: 'auto' }}>
@@ -535,7 +823,11 @@ export default function POS() {
           ) : (
             cart.map((item) => {
               const itemStock = Number(item.stock) || 0;
-              const atMax = itemStock > 0 && item.quantity >= itemStock;
+              const atMax = item.quantity >= itemStock;
+              const displayQty =
+                qtyDrafts[item.productId] !== undefined
+                  ? qtyDrafts[item.productId]
+                  : item.quantity;
               return (
                 <div
                   key={item.productId}
@@ -550,14 +842,15 @@ export default function POS() {
                   <div>
                     <div style={{ fontWeight: 500 }}>{item.name}</div>
                     <div style={{ fontSize: 13, color: 'var(--text-light)' }}>
-                      ${Number(item.price).toFixed(2)} each
+                      ${Number(item.price || 0).toFixed(2)} each
                     </div>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--primary)' }}>
-                      ${(Number(item.price) * Number(item.quantity)).toFixed(2)}
+                      ${(Number(item.price || 0) * Number(item.quantity || 0)).toFixed(2)}
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <button
+                      type="button"
                       className="btn btn-secondary"
                       style={{ padding: '2px 8px' }}
                       onClick={() => updateQuantity(item.productId, item.quantity - 1)}
@@ -567,8 +860,10 @@ export default function POS() {
                     <input
                       type="number"
                       min="1"
-                      value={item.quantity}
+                      max={itemStock > 0 ? itemStock : undefined}
+                      value={displayQty}
                       onChange={(e) => handleQtyChange(item, e)}
+                      onBlur={() => handleQtyBlur(item)}
                       style={{
                         width: 50,
                         textAlign: 'center',
@@ -579,6 +874,7 @@ export default function POS() {
                       }}
                     />
                     <button
+                      type="button"
                       className="btn btn-secondary"
                       style={{ padding: '2px 8px' }}
                       disabled={atMax}
@@ -587,6 +883,7 @@ export default function POS() {
                       +
                     </button>
                     <button
+                      type="button"
                       className="btn btn-danger"
                       style={{ padding: '2px 8px' }}
                       onClick={() => removeFromCart(item.productId)}
@@ -605,15 +902,17 @@ export default function POS() {
             <span>Subtotal:</span>
             <span>${subtotal.toFixed(2)}</span>
           </div>
-          <div className="form-group">
-            <label>Discount ($)</label>
-            <input type="number" min="0" step="0.01" value={discount} onChange={handleDiscountChange} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div className="form-group" style={{ marginBottom: 10 }}>
+              <label>Discount ($)</label>
+              <input type="number" min="0" step="0.01" value={discount} onChange={handleDiscountChange} />
+            </div>
+            <div className="form-group" style={{ marginBottom: 10 }}>
+              <label>Tax ($)</label>
+              <input type="number" min="0" step="0.01" value={tax} onChange={handleTaxChange} />
+            </div>
           </div>
-          <div className="form-group">
-            <label>Tax ($)</label>
-            <input type="number" min="0" step="0.01" value={tax} onChange={handleTaxChange} />
-          </div>
-          <div className="form-group">
+          <div className="form-group" style={{ marginBottom: 10 }}>
             <label>Payment Method</label>
             <div style={{ display: 'flex', gap: 8 }}>
               {paymentMethods.map((method) => (
@@ -636,6 +935,26 @@ export default function POS() {
               ))}
             </div>
           </div>
+          <div className="form-group" style={{ marginBottom: 10 }}>
+            <label>Payment Status</label>
+            <select
+              value={paymentStatus}
+              onChange={(e) => setPaymentStatus(e.target.value)}
+            >
+              <option value="paid">Paid</option>
+              <option value="pending">Pending</option>
+              <option value="partial">Partial</option>
+            </select>
+          </div>
+          <div className="form-group" style={{ marginBottom: 12 }}>
+            <label>Order Notes (Optional)</label>
+            <input
+              type="text"
+              placeholder="Add note to receipt..."
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+            />
+          </div>
           <div
             style={{
               display: 'flex',
@@ -649,10 +968,16 @@ export default function POS() {
             <span>${total.toFixed(2)}</span>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn btn-secondary" style={{ flex: 1, padding: 14 }} onClick={handleHoldOrder}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              style={{ flex: 1, padding: 14 }}
+              onClick={handleHoldOrder}
+            >
               Hold Order
             </button>
             <button
+              type="button"
               className="btn btn-primary"
               style={{ flex: 1, padding: 14 }}
               disabled={checking}
@@ -679,12 +1004,13 @@ export default function POS() {
         >
           <div
             className="card"
-            style={{ width: 560, maxHeight: '80vh', overflow: 'auto' }}
+            style={{ width: 560, maxWidth: '95vw', maxHeight: '80vh', overflow: 'auto' }}
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
               <h2>Held Orders ({heldOrders.length})</h2>
               <button
+                type="button"
                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-light)' }}
                 onClick={() => setHeldOpen(false)}
               >
@@ -697,13 +1023,15 @@ export default function POS() {
               </p>
             ) : (
               heldOrders.map((o) => {
-                const heldTotal =
+                const heldTotal = Math.max(
+                  0,
                   (o.cart || []).reduce(
                     (sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0),
                     0
                   ) -
-                  Number(o.discount || 0) +
-                  Number(o.tax || 0);
+                    Number(o.discount || 0) +
+                    Number(o.tax || 0)
+                );
                 return (
                   <div
                     key={o.id}
@@ -726,6 +1054,7 @@ export default function POS() {
                     </div>
                     <div style={{ display: 'flex', gap: 6 }}>
                       <button
+                        type="button"
                         className="btn btn-primary"
                         style={{ padding: '6px 12px', fontSize: 12 }}
                         onClick={() => resumeOrder(o)}
@@ -733,6 +1062,7 @@ export default function POS() {
                         Resume
                       </button>
                       <button
+                        type="button"
                         className="btn btn-danger"
                         style={{ padding: '6px 12px', fontSize: 12 }}
                         onClick={() => deleteHeld(o.id)}

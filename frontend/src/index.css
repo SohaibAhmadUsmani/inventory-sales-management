@@ -1,16 +1,27 @@
 :root {
   --primary: #4f46e5;
   --primary-dark: #4338ca;
+  --primary-soft: rgba(79, 70, 229, 0.1);
   --bg: #f1f5f9;
-  --sidebar-bg: #1e293b;
+  --sidebar-bg: #0f172a;
   --sidebar-text: #cbd5e1;
   --card-bg: #ffffff;
-  --text: #1e293b;
+  --text: #0f172a;
   --text-light: #64748b;
   --border: #e2e8f0;
   --success: #22c55e;
   --danger: #ef4444;
   --warning: #f59e0b;
+
+  /* Emil Kowalski custom easing curves */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Tinted elevation depth tokens */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 16px 36px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.05);
 }
 
 * {
@@ -19,21 +30,60 @@
   box-sizing: border-box;
 }
 
+/* Lenis smooth scroll base rules */
+html.lenis,
+html.lenis body {
+  height: auto;
+}
+
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+
+.lenis.lenis-smooth [data-lenis-prevent] {
+  overscroll-behavior: contain;
+}
+
+.lenis.lenis-stopped {
+  overflow: hidden;
+}
+
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: var(--bg);
   color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
-.app-layout {
-  display: flex;
-  min-height: 100vh;
+/* Browser surfaces: selection, focus ring, scrollbars (per craft-floor.md) */
+::selection {
+  background: rgba(79, 70, 229, 0.18);
+  color: var(--text);
 }
 
-.main-content {
-  flex: 1;
-  padding: 24px;
-  margin-left: 260px;
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.28);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.45);
 }
 
 .page-header {
@@ -46,13 +96,15 @@ body {
 .page-header h1 {
   font-size: 24px;
   font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .card {
   background: var(--card-bg);
   border-radius: 12px;
   padding: 24px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  box-shadow: var(--shadow-sm);
   margin-bottom: 20px;
 }
 
@@ -63,16 +115,41 @@ body {
   cursor: pointer;
   font-size: 14px;
   font-weight: 500;
-  transition: all 0.2s;
+  transition:
+    transform 140ms var(--ease-out),
+    background-color 150ms ease,
+    box-shadow 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .btn-primary {
   background: var(--primary);
   color: white;
+  box-shadow: 0 1px 2px rgba(79, 70, 229, 0.25);
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   background: var(--primary-dark);
+  box-shadow: 0 4px 10px rgba(79, 70, 229, 0.28);
+}
+
+.btn-success {
+  background: var(--success);
+  color: white;
+}
+
+.btn-success:hover:not(:disabled) {
+  background: #16a34a;
 }
 
 .btn-danger {
@@ -80,9 +157,17 @@ body {
   color: white;
 }
 
+.btn-danger:hover:not(:disabled) {
+  background: #dc2626;
+}
+
 .btn-secondary {
   background: var(--border);
   color: var(--text);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #cbd5e1;
 }
 
 table {
@@ -96,10 +181,15 @@ th, td {
   border-bottom: 1px solid var(--border);
 }
 
+td {
+  font-variant-numeric: tabular-nums;
+}
+
 th {
   background: var(--bg);
   font-weight: 600;
-  font-size: 13px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-light);
 }
@@ -124,14 +214,18 @@ th {
   border-radius: 8px;
   font-size: 14px;
   outline: none;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .form-group input:focus,
-.form-group select:focus {
+.form-group select:focus,
+.form-group textarea:focus {
   border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
 }
 
 .search-bar {
+  position: relative;
   display: flex;
   gap: 12px;
   margin-bottom: 20px;
@@ -143,6 +237,13 @@ th {
   border-radius: 8px;
   font-size: 14px;
   min-width: 300px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.search-bar input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
 }
 
 .badge {
@@ -151,12 +252,14 @@ th {
   border-radius: 20px;
   font-size: 12px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .badge-success { background: #dcfce7; color: #166534; }
 .badge-danger { background: #fef2f2; color: #991b1b; }
 .badge-warning { background: #fefce8; color: #854d0e; }
 .badge-info { background: #eff6ff; color: #1e40af; }
+.badge-secondary { background: #f1f5f9; color: #475569; }
 
 .loading {
   display: flex;
@@ -168,15 +271,12 @@ th {
 }
 
 @media (max-width: 768px) {
-  .main-content {
-    margin-left: 0;
-    padding: 16px;
-  }
   .search-bar input {
     min-width: auto;
     flex: 1;
   }
 }
+
 /* ==========================================================================
    Customer & Supplier Management (Shanza)
    Appended at the end of the file on purpose to keep this addition isolated
@@ -197,10 +297,6 @@ th {
   gap: 12px;
   margin-bottom: 20px;
   flex-wrap: wrap;
-}
-
-.search-bar {
-  position: relative;
 }
 
 .search-icon {
@@ -235,7 +331,8 @@ th {
   background: var(--card-bg);
   border-radius: 12px;
   padding: 18px 20px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  box-shadow: var(--shadow-sm);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -253,12 +350,14 @@ th {
   font-size: 24px;
   font-weight: 700;
   color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-value-sm {
   font-size: 14px;
   font-weight: 500;
   color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 .badge-muted { background: var(--border); color: var(--text-light); }
@@ -328,12 +427,16 @@ th {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s, color 0.15s;
+  transition: transform 140ms var(--ease-out), background-color 150ms ease, color 150ms ease;
 }
 
 .icon-btn:hover {
   background: var(--bg);
   color: var(--text);
+}
+
+.icon-btn:active {
+  transform: scale(0.94);
 }
 
 .icon-btn-danger:hover {
@@ -361,6 +464,7 @@ th {
   position: fixed;
   inset: 0;
   background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(4px);
   display: flex;
   justify-content: center;
   align-items: center;
@@ -370,12 +474,22 @@ th {
 
 .modal-box {
   background: var(--card-bg);
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 24px;
   width: 100%;
   max-width: 440px;
   max-height: 90vh;
   overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+  transform-origin: center;
+  transition: transform 200ms var(--ease-out), opacity 200ms var(--ease-out);
+}
+
+@starting-style {
+  .modal-box {
+    opacity: 0;
+    transform: scale(0.96);
+  }
 }
 
 .modal-box-lg {
@@ -438,5 +552,16 @@ th {
   }
   .modal-box {
     max-width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

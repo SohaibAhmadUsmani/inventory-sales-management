@@ -2,11 +2,11 @@ const mongoose = require('mongoose');
 
 const supplierSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
-  company: { type: String, default: '' },
-  phone: { type: String, default: '' },
-  email: { type: String, default: '', lowercase: true },
-  address: { type: String, default: '' },
-  totalPurchases: { type: Number, default: 0 },
+  company: { type: String, default: '', trim: true },
+  phone: { type: String, default: '', trim: true },
+  email: { type: String, default: '', lowercase: true, trim: true },
+  address: { type: String, default: '', trim: true },
+  totalPurchases: { type: Number, default: 0, min: 0 },
   isActive: { type: Boolean, default: true },
 }, { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } });
 
@@ -19,4 +19,6 @@ supplierSchema.virtual('productsSupplied', {
   foreignField: 'supplier',
 });
 
-module.exports = mongoose.model('Supplier', supplierSchema);
+supplierSchema.index({ isActive: 1, name: 1 });
+
+module.exports = mongoose.model('Supplier', supplierSchema);

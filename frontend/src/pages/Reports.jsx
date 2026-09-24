@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
 import { toast } from 'react-toastify';
 import PageHeader from '../components/PageHeader';
+import { exportCsv } from '../utils/exportCsv';
 import { FiDownload, FiFileText } from 'react-icons/fi';
 
 const TABS = [
@@ -15,13 +16,42 @@ const TABS = [
 
 const money = (n) => `$${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+function buildParamsForTab(tab, filters) {
+  const { startDate, endDate, groupBy, customer, paymentMethod, status, product, category, supplier } = filters;
+  const params = {};
+  if (['sales', 'products', 'profit', 'suppliers'].includes(tab)) {
+    if (startDate) params.startDate = startDate;
+    if (endDate) params.endDate = endDate;
+  }
+  if (tab === 'sales') {
+    params.groupBy = groupBy;
+    if (customer) params.customer = customer;
+    if (paymentMethod) params.paymentMethod = paymentMethod;
+    if (status) params.status = status;
+  }
+  if (tab === 'products' || tab === 'profit') {
+    if (product) params.product = product;
+    if (category) params.category = category;
+  }
+  if (tab === 'inventory' && category) params.category = category;
+  if (tab === 'customers' && customer) params.customer = customer;
+  if (tab === 'suppliers' && supplier) params.supplier = supplier;
+  return params;
+}
+
 export default function Reports() {
   const [activeTab, setActiveTab] = useState('sales');
   const [filters, setFilters] = useState({ startDate: '', endDate: '', groupBy: 'day', customer: '', paymentMethod: '', status: '', product: '', category: '', supplier: '' });
+  const [appliedParams, setAppliedParams] = useState({ groupBy: 'day' });
   const [reportData, setReportData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [exporting, setExporting] = useState('');
+
+  const [reportMonth, setReportMonth] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
 
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -29,50 +59,41 @@ export default function Reports() {
   const [suppliers, setSuppliers] = useState([]);
 
   useEffect(() => {
-    api.get('/products', { params: { limit: 500 } }).then(res => setProducts(res.data.products || [])).catch(() => {});
-    api.get('/categories').then(res => setCategories(res.data.categories || [])).catch(() => {});
-    api.get('/customers', { params: { limit: 500 } }).then(res => setCustomers(res.data.customers || [])).catch(() => {});
-    api.get('/suppliers').then(res => setSuppliers(res.data.suppliers || [])).catch(() => {});
+    api.get('/products', { params: { limit: 500 } }).then(res => setProducts(res.data?.products || [])).catch(() => {});
+    api.get('/categories').then(res => setCategories(res.data?.categories || [])).catch(() => {});
+    api.get('/customers', { params: { limit: 500 } }).then(res => setCustomers(res.data?.customers || [])).catch(() => {});
+    api.get('/suppliers', { params: { limit: 500 } }).then(res => setSuppliers(res.data?.suppliers || [])).catch(() => {});
   }, []);
 
+  const runReportFetch = useCallback((tab, params) => {
+    setLoading(true);
+    setError(null);
+    setAppliedParams(params);
+    api.get(`/reports/${tab}`, { params })
+      .then(res => setReportData(res.data))
+      .catch(err => setError(err.response?.data?.message || 'Failed to fetch report'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    const params = buildParamsForTab(activeTab, filters);
+    runReportFetch(activeTab, params);
+    // Auto-fetch on initial mount and whenever activeTab changes (FE-100)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, runReportFetch]);
+
   const switchTab = (tab) => {
-    setActiveTab(tab);
+    if (tab === activeTab) return;
     setReportData(null);
     setError(null);
+    setActiveTab(tab);
   };
 
   const updateFilter = (key, value) => setFilters(f => ({ ...f, [key]: value }));
 
-  const activeParams = () => {
-    const { startDate, endDate, groupBy, customer, paymentMethod, status, product, category, supplier } = filters;
-    const params = {};
-    if (['sales', 'products', 'profit', 'suppliers'].includes(activeTab)) {
-      if (startDate) params.startDate = startDate;
-      if (endDate) params.endDate = endDate;
-    }
-    if (activeTab === 'sales') {
-      params.groupBy = groupBy;
-      if (customer) params.customer = customer;
-      if (paymentMethod) params.paymentMethod = paymentMethod;
-      if (status) params.status = status;
-    }
-    if (activeTab === 'products' || activeTab === 'profit') {
-      if (product) params.product = product;
-      if (category) params.category = category;
-    }
-    if (activeTab === 'inventory' && category) params.category = category;
-    if (activeTab === 'customers' && customer) params.customer = customer;
-    if (activeTab === 'suppliers' && supplier) params.supplier = supplier;
-    return params;
-  };
-
   const fetchReport = () => {
-    setLoading(true);
-    setError(null);
-    api.get(`/reports/${activeTab}`, { params: activeParams() })
-      .then(res => setReportData(res.data))
-      .catch(err => setError(err.response?.data?.message || 'Failed to fetch report'))
-      .finally(() => setLoading(false));
+    const params = buildParamsForTab(activeTab, filters);
+    runReportFetch(activeTab, params);
   };
 
   const triggerDownload = (blob, filename) => {
@@ -90,7 +111,7 @@ export default function Reports() {
     const key = `${activeTab}-${format}`;
     setExporting(key);
     try {
-      const res = await api.get(`/reports/${activeTab}/export/${format}`, { params: activeParams(), responseType: 'blob' });
+      const res = await api.get(`/reports/${activeTab}/export/${format}`, { params: appliedParams, responseType: 'blob' });
       triggerDownload(res.data, `${activeTab}_report.${format === 'excel' ? 'xlsx' : 'pdf'}`);
     } catch (err) {
       toast.error('Export failed');
@@ -99,15 +120,110 @@ export default function Reports() {
     }
   };
 
+  const handleExportCsv = () => {
+    if (!reportData) return;
+
+    if (activeTab === 'sales') {
+      const rows = reportData.sales || [];
+      if (rows.length === 0) return toast.info('No sales data to export');
+      exportCsv('sales_report.csv', rows, {
+        Period: (s) => s._id,
+        'Sales Count': (s) => s.count,
+        'Total Revenue': (s) => Number(s.totalSales || 0).toFixed(2),
+        'Avg Sale': (s) => Number(s.avgSale || 0).toFixed(2),
+      });
+      return;
+    }
+
+    if (activeTab === 'products') {
+      const rows = reportData.productSales || [];
+      if (rows.length === 0) return toast.info('No product sales data to export');
+      exportCsv('product_sales_report.csv', rows, {
+        Product: (p) => p._id,
+        SKU: (p) => p.sku || '',
+        'Qty Sold': (p) => p.totalQuantity,
+        Revenue: (p) => Number(p.totalRevenue || 0).toFixed(2),
+      });
+      return;
+    }
+
+    if (activeTab === 'inventory') {
+      const rows = reportData.products || [];
+      if (rows.length === 0) return toast.info('No inventory data to export');
+      exportCsv('inventory_report.csv', rows, {
+        Name: (p) => p.name,
+        SKU: (p) => p.sku,
+        Category: (p) => p.category?.name || '-',
+        Price: (p) => Number(p.price || 0).toFixed(2),
+        Cost: (p) => Number(p.cost || 0).toFixed(2),
+        Stock: (p) => p.stock,
+        'Min Stock': (p) => p.minimumStock,
+        Status: (p) => (p.stock === 0 ? 'Out of Stock' : p.stock <= p.minimumStock ? 'Low Stock' : 'In Stock'),
+      });
+      return;
+    }
+
+    if (activeTab === 'profit') {
+      const rows = reportData.profitData || [];
+      if (rows.length === 0) return toast.info('No profit data to export');
+      exportCsv('profit_report.csv', rows, {
+        Date: (d) => d._id,
+        Revenue: (d) => Number(d.revenue || 0).toFixed(2),
+        Cost: (d) => Number(d.cost || 0).toFixed(2),
+        Profit: (d) => Number(d.profit || 0).toFixed(2),
+      });
+      return;
+    }
+
+    if (activeTab === 'customers') {
+      if (reportData.purchaseHistory) {
+        const rows = reportData.purchaseHistory || [];
+        if (rows.length === 0) return toast.info('No customer purchases to export');
+        exportCsv('customer_purchases_report.csv', rows, {
+          'Invoice #': (s) => s.invoiceNumber,
+          Date: (s) => new Date(s.createdAt).toLocaleDateString(),
+          Total: (s) => Number(s.total || 0).toFixed(2),
+          Payment: (s) => s.paymentMethod,
+          Status: (s) => s.status,
+        });
+      } else {
+        const rows = reportData.topCustomers || [];
+        if (rows.length === 0) return toast.info('No customer data to export');
+        exportCsv('customers_report.csv', rows, {
+          Name: (c) => c.name,
+          Phone: (c) => c.phone || '-',
+          Email: (c) => c.email || '-',
+          'Total Orders': (c) => c.totalOrders,
+          'Total Spending': (c) => Number(c.totalSpending || 0).toFixed(2),
+        });
+      }
+      return;
+    }
+
+    if (activeTab === 'suppliers') {
+      const rows = reportData.supplierPurchases || [];
+      if (rows.length === 0) return toast.info('No supplier purchases to export');
+      exportCsv('supplier_purchases_report.csv', rows, {
+        Supplier: (s) => s.name,
+        Company: (s) => s.company || '-',
+        'Order Count': (s) => s.orderCount,
+        'Total Purchases': (s) => Number(s.totalPurchases || 0).toFixed(2),
+      });
+    }
+  };
+
   const downloadMonthlyReport = async () => {
     setExporting('monthly');
     try {
       const now = new Date();
+      const [yearStr, monthStr] = (reportMonth || '').split('-');
+      const year = parseInt(yearStr, 10) || now.getFullYear();
+      const month = parseInt(monthStr, 10) || (now.getMonth() + 1);
       const res = await api.get('/reports/monthly/export/pdf', {
-        params: { month: now.getMonth() + 1, year: now.getFullYear() },
+        params: { month, year },
         responseType: 'blob',
       });
-      triggerDownload(res.data, 'Monthly_Business_Report.pdf');
+      triggerDownload(res.data, `Monthly_Business_Report_${year}_${String(month).padStart(2, '0')}.pdf`);
     } catch (err) {
       toast.error('Export failed');
     } finally {
@@ -116,10 +232,19 @@ export default function Reports() {
   };
 
   const headerActions = (
-    <button className="ui-btn-dark" onClick={downloadMonthlyReport} disabled={exporting === 'monthly'}>
-      <FiFileText size={16} />
-      {exporting === 'monthly' ? 'Generating...' : 'Monthly Business Report'}
-    </button>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <input
+        type="month"
+        className="ui-filter-input"
+        value={reportMonth}
+        onChange={(e) => setReportMonth(e.target.value)}
+        aria-label="Select month for Monthly Business Report"
+      />
+      <button className="ui-btn-dark" onClick={downloadMonthlyReport} disabled={exporting === 'monthly'}>
+        <FiFileText size={16} />
+        {exporting === 'monthly' ? 'Generating...' : 'Monthly Business Report (PDF)'}
+      </button>
+    </div>
   );
 
   return (
@@ -136,8 +261,8 @@ export default function Reports() {
       <div className="ui-filter-bar">
         {['sales', 'products', 'profit', 'suppliers'].includes(activeTab) && (
           <>
-            <input type="date" className="ui-filter-input" value={filters.startDate} onChange={e => updateFilter('startDate', e.target.value)} />
-            <input type="date" className="ui-filter-input" value={filters.endDate} onChange={e => updateFilter('endDate', e.target.value)} />
+            <input type="date" className="ui-filter-input" value={filters.startDate} max={filters.endDate || undefined} onChange={e => updateFilter('startDate', e.target.value)} aria-label="Start date" />
+            <input type="date" className="ui-filter-input" value={filters.endDate} min={filters.startDate || undefined} onChange={e => updateFilter('endDate', e.target.value)} aria-label="End date" />
           </>
         )}
 
@@ -207,6 +332,10 @@ export default function Reports() {
 
         {reportData && (
           <>
+            <button className="ui-btn-outline" onClick={handleExportCsv}>
+              <FiDownload size={14} />
+              CSV
+            </button>
             <button className="ui-btn-outline" onClick={() => downloadExport('excel')} disabled={exporting === `${activeTab}-excel`}>
               <FiDownload size={14} />
               {exporting === `${activeTab}-excel` ? 'Exporting...' : 'Excel'}
@@ -234,15 +363,17 @@ export default function Reports() {
 
 function SummaryCards({ summary }) {
   if (!summary) return null;
+  const entries = Object.entries(summary).filter(([key]) => key !== '_id');
+  if (entries.length === 0) return null;
   return (
     <div className="ui-summary-grid">
-      {Object.entries(summary).map(([key, val]) => (
+      {entries.map(([key, val]) => (
         <div key={key} className="ui-summary-item">
           <div className="ui-summary-label">{key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim()}</div>
           <div className="ui-summary-value">
             {typeof val === 'number'
               ? (/Revenue|Cost|Profit|Spending|Value|avgSale/.test(key) ? money(val) : val.toLocaleString())
-              : String(val)}
+              : String(val ?? 0)}
           </div>
         </div>
       ))}
@@ -303,7 +434,15 @@ function ReportResults({ tab, data }) {
               <tr key={p._id}>
                 <td>{p.name}</td><td>{p.sku}</td><td>{p.category?.name || '-'}</td>
                 <td>{money(p.price)}</td><td>{money(p.cost)}</td><td>{p.stock}</td><td>{p.minimumStock}</td>
-                <td>{p.stock <= p.minimumStock ? <span className="badge badge-danger">Low Stock</span> : <span className="badge badge-success">In Stock</span>}</td>
+                <td>
+                  {p.stock === 0 ? (
+                    <span className="badge badge-danger">Out of Stock</span>
+                  ) : p.stock <= p.minimumStock ? (
+                    <span className="badge badge-warning">Low Stock</span>
+                  ) : (
+                    <span className="badge badge-success">In Stock</span>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>

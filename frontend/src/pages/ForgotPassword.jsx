@@ -10,27 +10,46 @@ export default function ForgotPassword() {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [sent, setSent] = useState(false);
+  const [error, setError] = useState('');
+  const [resetUrl, setResetUrl] = useState('');
+  const [devNote, setDevNote] = useState('');
   const videoRef = useRef(null);
 
   useEffect(() => {
+    const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
     if (videoRef.current) {
-      videoRef.current.playbackRate = 0.7;
+      if (prefersReducedMotion) {
+        videoRef.current.pause();
+      } else {
+        videoRef.current.playbackRate = 0.7;
+      }
     }
   }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setError('');
+    const trimmedEmail = email.trim();
     setLoading(true);
     try {
-      const res = await api.post('/auth/forgot-password', { email });
+      const res = await api.post('/auth/forgot-password', { email: trimmedEmail });
+      setEmail(trimmedEmail);
+      setResetUrl(res.data?.resetUrl || '');
+      setDevNote(res.data?.devNote || '');
       setSent(true);
       toast.success(res.data.message || 'If an account exists for this email, a password reset link has been generated.');
     } catch (err) {
-      toast.error(err.response?.data?.message || 'Failed to send reset email');
+      const msg = err.response?.data?.message || 'Failed to send reset email';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setLoading(false);
     }
   };
+
+  const resetPath = resetUrl.includes('/reset-password/')
+    ? `/reset-password/${resetUrl.split('/reset-password/')[1]}`
+    : resetUrl;
 
   return (
     <div className="auth-page">
@@ -41,6 +60,7 @@ export default function ForgotPassword() {
         muted
         loop
         playsInline
+        aria-hidden="true"
         src={loginBg}
       />
       <div className="auth-bg-overlay" />
@@ -89,14 +109,47 @@ export default function ForgotPassword() {
           </div>
 
           {sent ? (
-            <div className="auth-success">
-              <span className="auth-success-icon">
-                <FiCheckCircle size={16} />
-              </span>
-              If an account exists for <strong>{email}</strong>, a reset link has been sent.
+            <div className="auth-success" role="status" aria-live="polite" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="auth-success-icon">
+                  <FiCheckCircle size={16} />
+                </span>
+                <span>
+                  If an account exists for <strong>{email}</strong>, a reset link has been sent.
+                </span>
+              </div>
+              {resetUrl && (
+                <div style={{ width: '100%', paddingTop: 8, borderTop: '1px solid rgba(34, 197, 94, 0.25)', fontSize: 12.5 }}>
+                  {devNote && <p style={{ marginBottom: 6, opacity: 0.9 }}>{devNote}</p>}
+                  {resetPath.startsWith('/') ? (
+                    <Link
+                      to={resetPath}
+                      style={{ color: '#bbf7d0', fontWeight: 600, textDecoration: 'underline', wordBreak: 'break-all' }}
+                    >
+                      Click here to reset your password ({resetUrl})
+                    </Link>
+                  ) : (
+                    <a
+                      href={resetUrl}
+                      style={{ color: '#bbf7d0', fontWeight: 600, textDecoration: 'underline', wordBreak: 'break-all' }}
+                    >
+                      Click here to reset your password ({resetUrl})
+                    </a>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <form className="auth-form" onSubmit={handleSubmit}>
+              {error && (
+                <div className="auth-error" key={error} role="alert" aria-live="assertive">
+                  <span className="auth-error-icon">
+                    <FiAlertCircle size={16} />
+                  </span>
+                  {error}
+                </div>
+              )}
+
               <div className="auth-input-group">
                 <label className="auth-input-label" htmlFor="forgot-email">Email address</label>
                 <div className="auth-input-wrap">

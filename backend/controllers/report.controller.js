@@ -9,14 +9,33 @@ const { exportReportToExcel } = require('../utils/excelExport');
 const { generateReportPDF, generateMonthlyBusinessReportPDF } = require('../utils/pdfExport');
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-const oid = (id) => new mongoose.Types.ObjectId(id);
+const oid = (id) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    const err = new Error(`Invalid ID format: ${id}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return new mongoose.Types.ObjectId(id);
+};
+
+const parseEndDate = (endDate) => {
+  const str = String(endDate).trim();
+  return new Date(str.includes('T') ? str : `${str}T23:59:59.999Z`);
+};
 
 const buildDateMatch = (startDate, endDate, field = 'createdAt') => {
   const match = {};
   if (startDate || endDate) {
     match[field] = {};
-    if (startDate) match[field].$gte = new Date(startDate);
-    if (endDate) match[field].$lte = new Date(endDate + 'T23:59:59.999Z');
+    if (startDate) {
+      const s = new Date(startDate);
+      if (!Number.isNaN(s.getTime())) match[field].$gte = s;
+    }
+    if (endDate) {
+      const e = parseEndDate(endDate);
+      if (!Number.isNaN(e.getTime())) match[field].$lte = e;
+    }
+    if (Object.keys(match[field]).length === 0) delete match[field];
   }
   return match;
 };
@@ -31,10 +50,10 @@ const dateRangeLabel = (startDate, endDate) => {
 
 const resolveFilterLabels = async ({ product, category, customer, supplier, paymentMethod, status } = {}) => {
   const [p, c, cu, s] = await Promise.all([
-    product ? Product.findById(product).select('name') : null,
-    category ? Category.findById(category).select('name') : null,
-    customer ? Customer.findById(customer).select('name') : null,
-    supplier ? Supplier.findById(supplier).select('name') : null,
+    product && mongoose.Types.ObjectId.isValid(product) ? Product.findById(product).select('name') : null,
+    category && mongoose.Types.ObjectId.isValid(category) ? Category.findById(category).select('name') : null,
+    customer && mongoose.Types.ObjectId.isValid(customer) ? Customer.findById(customer).select('name') : null,
+    supplier && mongoose.Types.ObjectId.isValid(supplier) ? Supplier.findById(supplier).select('name') : null,
   ]);
   const labels = [];
   if (p) labels.push(`Product: ${p.name}`);
@@ -49,7 +68,12 @@ const resolveFilterLabels = async ({ product, category, customer, supplier, paym
 /* ---------------------------- Sales report ---------------------------- */
 
 const getSalesReportData = async ({ startDate, endDate, groupBy = 'day', customer, paymentMethod, status }) => {
-  const match = { status: status || 'completed', ...buildDateMatch(startDate, endDate) };
+  const match = { ...buildDateMatch(startDate, endDate) };
+  if (status && status !== 'all') {
+    match.status = status;
+  } else if (!status) {
+    match.status = 'completed';
+  }
   if (customer) match.customer = oid(customer);
   if (paymentMethod) match.paymentMethod = paymentMethod;
   const dateFormat = groupBy === 'month' ? '%Y-%m' : groupBy === 'week' ? '%Y-W%V' : '%Y-%m-%d';
@@ -58,9 +82,12 @@ const getSalesReportData = async ({ startDate, endDate, groupBy = 'day', custome
     { $group: { _id: { $dateToString: { format: dateFormat, date: '$createdAt' } }, totalSales: { $sum: '$total' }, count: { $sum: 1 }, avgSale: { $avg: '$total' } } },
     { $sort: { _id: 1 } },
   ]);
-  const summaryAgg = await Sale.aggregate([{ $match: match }, { $group: { _id: null, totalRevenue: { $sum: '$total' }, totalSales: { $sum: 1 }, avgSale: { $avg: '$total' } } }]);
-  const summary = summaryAgg[0] || { totalRevenue: 0, totalSales: 0, avgSale: 0 };
-  return { sales, summary };
+  const summaryAgg = await Sale.aggregate([
+    { $match: match },
+    { $group: { _id: null, totalRevenue: { $sum: '$total' }, totalSales: { $sum: 1 }, avgSale: { $avg: '$total' } } },
+  ]);
+  const { _id, ...cleanSummary } = summaryAgg[0] || { totalRevenue: 0, totalSales: 0, avgSale: 0 };
+  return { sales, summary: cleanSummary };
 };
 
 exports.salesReport = async (req, res, next) => {
@@ -111,8 +138,17 @@ const getProductSalesReportData = async ({ startDate, endDate, product, category
     );
   }
   pipeline.push(
-    { $group: { _id: '$items.name', totalQuantity: { $sum: '$items.quantity' }, totalRevenue: { $sum: '$items.total' }, sku: { $first: '$items.sku' } } },
+    {
+      $group: {
+        _id: '$items.product',
+        name: { $first: '$items.name' },
+        totalQuantity: { $sum: '$items.quantity' },
+        totalRevenue: { $sum: '$items.total' },
+        sku: { $first: '$items.sku' },
+      },
+    },
     { $sort: { totalRevenue: -1 } },
+    { $project: { _id: '$name', totalQuantity: 1, totalRevenue: 1, sku: 1 } },
   );
   const productSales = await Sale.aggregate(pipeline);
   return { productSales };
@@ -160,7 +196,7 @@ exports.exportProductSalesPdf = async (req, res, next) => {
 
 const getInventoryReportData = async ({ category }) => {
   const query = { isActive: true };
-  if (category) query.category = category;
+  if (category) query.category = oid(category);
   const products = await Product.find(query).populate('category', 'name').sort('name');
   const summary = {
     totalProducts: products.length,
@@ -184,7 +220,8 @@ exports.exportInventoryExcel = async (req, res, next) => {
     const { products, summary } = await getInventoryReportData(req.query);
     const rows = products.map((p) => ({
       Name: p.name, SKU: p.sku, Category: p.category?.name || '', Price: p.price, Cost: p.cost,
-      Stock: p.stock, 'Min Stock': p.minimumStock, Status: p.stock <= p.minimumStock ? 'Low Stock' : 'In Stock',
+      Stock: p.stock, 'Min Stock': p.minimumStock,
+      Status: p.stock === 0 ? 'Out of Stock' : p.stock <= p.minimumStock ? 'Low Stock' : 'In Stock',
     }));
     const totals = {
       Name: 'TOTAL', SKU: '', Category: `${summary.totalProducts} products`, Price: '',
@@ -200,7 +237,16 @@ exports.exportInventoryPdf = async (req, res, next) => {
     const { products, summary } = await getInventoryReportData(req.query);
     const { category } = req.query;
     const filters = await resolveFilterLabels({ category });
-    const rows = products.map((p) => [p.name, p.sku, p.category?.name || '', `$${p.price}`, `$${p.cost}`, String(p.stock), String(p.minimumStock), p.stock <= p.minimumStock ? 'Low Stock' : 'In Stock']);
+    const rows = products.map((p) => [
+      p.name,
+      p.sku,
+      p.category?.name || '',
+      `$${p.price}`,
+      `$${p.cost}`,
+      String(p.stock),
+      String(p.minimumStock),
+      p.stock === 0 ? 'Out of Stock' : p.stock <= p.minimumStock ? 'Low Stock' : 'In Stock',
+    ]);
     const totals = ['TOTAL', '', `${summary.totalProducts} products`, '', `Value: $${summary.totalStockValue}`, '', '', `Low: ${summary.lowStockCount} / Out: ${summary.outOfStockCount}`];
     await generateReportPDF({
       title: 'Inventory Report',
@@ -223,8 +269,23 @@ const getProfitReportData = async ({ startDate, endDate, product, category }) =>
     { $unwind: { path: '$productInfo', preserveNullAndEmptyArrays: true } },
   );
   if (category) pipeline.push({ $match: { 'productInfo.category': oid(category) } });
+
+  const unitCostExpr = {
+    $cond: [
+      { $gt: [{ $ifNull: ['$items.cost', 0] }, 0] },
+      '$items.cost',
+      { $ifNull: ['$productInfo.cost', 0] },
+    ],
+  };
+
   pipeline.push(
-    { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }, revenue: { $sum: '$items.total' }, cost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$productInfo.cost', 0] }] } } } },
+    {
+      $group: {
+        _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+        revenue: { $sum: '$items.total' },
+        cost: { $sum: { $multiply: ['$items.quantity', unitCostExpr] } },
+      },
+    },
     { $project: { _id: 1, revenue: 1, cost: 1, profit: { $subtract: ['$revenue', '$cost'] } } },
     { $sort: { _id: 1 } },
   );
@@ -272,14 +333,14 @@ exports.exportProfitPdf = async (req, res, next) => {
 
 const getCustomerReportData = async ({ customer }) => {
   if (customer) {
-    const cust = await Customer.findById(customer);
+    const cust = await Customer.findById(oid(customer));
     if (!cust) return { topCustomers: [], summary: { totalCustomers: 0, totalSpending: 0 }, purchaseHistory: [], singleCustomer: null };
-    const purchaseHistory = await Sale.find({ customer, status: 'completed' }).sort('-createdAt').select('invoiceNumber total createdAt paymentMethod status');
+    const purchaseHistory = await Sale.find({ customer: cust._id, status: 'completed' }).sort('-createdAt').select('invoiceNumber total createdAt paymentMethod status');
     return { topCustomers: [cust], summary: { totalCustomers: 1, totalSpending: round2(cust.totalSpending) }, purchaseHistory, singleCustomer: cust };
   }
   const customers = await Customer.find({ isActive: true }).sort('-totalSpending');
   const topCustomers = customers.slice(0, 10);
-  const summary = { totalCustomers: customers.length, totalSpending: round2(customers.reduce((s, c) => s + c.totalSpending, 0)) };
+  const summary = { totalCustomers: customers.length, totalSpending: round2(customers.reduce((s, c) => s + (c.totalSpending || 0), 0)) };
   return { topCustomers, summary, purchaseHistory: null, singleCustomer: null };
 };
 
@@ -292,7 +353,7 @@ exports.customerReport = async (req, res, next) => {
 
 exports.exportCustomerExcel = async (req, res, next) => {
   try {
-    const { topCustomers, summary, purchaseHistory, singleCustomer } = await getCustomerReportData(req.query);
+    const { topCustomers, purchaseHistory, singleCustomer } = await getCustomerReportData(req.query);
     if (singleCustomer) {
       const rows = purchaseHistory.map((s) => ({ 'Invoice #': s.invoiceNumber, Date: new Date(s.createdAt).toLocaleDateString(), Total: round2(s.total), Payment: s.paymentMethod, Status: s.status }));
       const totals = { 'Invoice #': 'TOTAL', Date: '', Total: round2(purchaseHistory.reduce((s, x) => s + x.total, 0)), Payment: '', Status: '' };
@@ -300,14 +361,20 @@ exports.exportCustomerExcel = async (req, res, next) => {
       return;
     }
     const rows = topCustomers.map((c) => ({ Name: c.name, Phone: c.phone, Email: c.email, 'Total Orders': c.totalOrders, 'Total Spending': round2(c.totalSpending) }));
-    const totals = { Name: 'TOTAL', Phone: '', Email: '', 'Total Orders': topCustomers.reduce((s, c) => s + c.totalOrders, 0), 'Total Spending': summary.totalSpending };
+    const totals = {
+      Name: 'TOTAL',
+      Phone: '',
+      Email: '',
+      'Total Orders': topCustomers.reduce((s, c) => s + (c.totalOrders || 0), 0),
+      'Total Spending': round2(topCustomers.reduce((s, c) => s + (c.totalSpending || 0), 0)),
+    };
     exportReportToExcel(res, { rows, totals, sheetName: 'Customer Report', filename: 'Customer_Report' });
   } catch (err) { next(err); }
 };
 
 exports.exportCustomerPdf = async (req, res, next) => {
   try {
-    const { topCustomers, summary, purchaseHistory, singleCustomer } = await getCustomerReportData(req.query);
+    const { topCustomers, purchaseHistory, singleCustomer } = await getCustomerReportData(req.query);
     if (singleCustomer) {
       const rows = purchaseHistory.map((s) => [s.invoiceNumber, new Date(s.createdAt).toLocaleDateString(), `$${round2(s.total)}`, s.paymentMethod, s.status]);
       const totals = ['TOTAL', '', `$${round2(purchaseHistory.reduce((s, x) => s + x.total, 0))}`, '', ''];
@@ -320,7 +387,13 @@ exports.exportCustomerPdf = async (req, res, next) => {
       return;
     }
     const rows = topCustomers.map((c) => [c.name, c.phone || '-', c.email || '-', String(c.totalOrders), `$${round2(c.totalSpending)}`]);
-    const totals = ['TOTAL', '', '', String(topCustomers.reduce((s, c) => s + c.totalOrders, 0)), `$${summary.totalSpending}`];
+    const totals = [
+      'TOTAL',
+      '',
+      '',
+      String(topCustomers.reduce((s, c) => s + (c.totalOrders || 0), 0)),
+      `$${round2(topCustomers.reduce((s, c) => s + (c.totalSpending || 0), 0))}`,
+    ];
     await generateReportPDF({
       title: 'Customer Report (Top 10 by spending)',
       headers: ['Name', 'Phone', 'Email', 'Total Orders', 'Total Spending'],
@@ -333,7 +406,7 @@ exports.exportCustomerPdf = async (req, res, next) => {
 /* ----------------------------- Supplier report ---------------------------- */
 
 const getSupplierReportData = async ({ startDate, endDate, supplier }) => {
-  const match = buildDateMatch(startDate, endDate, 'purchaseDate');
+  const match = { status: { $ne: 'cancelled' }, ...buildDateMatch(startDate, endDate, 'purchaseDate') };
   if (supplier) match.supplier = oid(supplier);
   const supplierPurchases = await Purchase.aggregate([
     { $match: match },
@@ -382,26 +455,49 @@ exports.exportSupplierPdf = async (req, res, next) => {
 
 /* ------------------------- Monthly business report ------------------------ */
 
+const formatLocalDateYMD = (dateObj) => {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const d = String(dateObj.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
 exports.exportMonthlyBusinessReportPdf = async (req, res, next) => {
   try {
     const now = new Date();
     const month = parseInt(req.query.month, 10) || now.getMonth() + 1;
     const year = parseInt(req.query.year, 10) || now.getFullYear();
-    const start = new Date(year, month - 1, 1);
+    const start = new Date(year, month - 1, 1, 0, 0, 0, 0);
     const end = new Date(year, month, 0, 23, 59, 59, 999);
     const monthLabel = start.toLocaleString('default', { month: 'long', year: 'numeric' });
 
     const match = { status: 'completed', createdAt: { $gte: start, $lte: end } };
 
-    const salesSummaryAgg = await Sale.aggregate([{ $match: match }, { $group: { _id: null, totalRevenue: { $sum: '$total' }, totalSales: { $sum: 1 }, avgSale: { $avg: '$total' } } }]);
+    const salesSummaryAgg = await Sale.aggregate([
+      { $match: match },
+      { $group: { _id: null, totalRevenue: { $sum: '$total' }, totalSales: { $sum: 1 }, avgSale: { $avg: '$total' } } },
+    ]);
     const salesSummary = salesSummaryAgg[0] || { totalRevenue: 0, totalSales: 0, avgSale: 0 };
 
-    const { summary: profitSummary } = await getProfitReportData({ startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) });
+    const { summary: profitSummary } = await getProfitReportData({
+      startDate: formatLocalDateYMD(start),
+      endDate: formatLocalDateYMD(end),
+    });
 
     const topProducts = await Sale.aggregate([
-      { $match: match }, { $unwind: '$items' },
-      { $group: { _id: '$items.name', qty: { $sum: '$items.quantity' }, revenue: { $sum: '$items.total' } } },
-      { $sort: { revenue: -1 } }, { $limit: 5 },
+      { $match: match },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: '$items.product',
+          name: { $first: '$items.name' },
+          qty: { $sum: '$items.quantity' },
+          revenue: { $sum: '$items.total' },
+        },
+      },
+      { $sort: { revenue: -1 } },
+      { $limit: 5 },
+      { $project: { _id: '$name', qty: 1, revenue: 1 } },
     ]);
 
     const categoryRevenue = await Sale.aggregate([
@@ -415,7 +511,7 @@ exports.exportMonthlyBusinessReportPdf = async (req, res, next) => {
     ]);
 
     const lowStockCount = await Product.countDocuments({ isActive: true, $expr: { $lte: ['$stock', '$minimumStock'] } });
-    const newCustomers = await Customer.countDocuments({ createdAt: { $gte: start, $lte: end } });
+    const newCustomers = await Customer.countDocuments({ isActive: true, createdAt: { $gte: start, $lte: end } });
 
     await generateMonthlyBusinessReportPDF({
       monthLabel,
@@ -428,3 +524,4 @@ exports.exportMonthlyBusinessReportPdf = async (req, res, next) => {
     }, res);
   } catch (err) { next(err); }
 };
+

@@ -1,9 +1,36 @@
 const XLSX = require('xlsx');
 
-exports.exportToExcel = (data, sheetName, filePath) => {
+const sanitizeSheetName = (sheetName = 'Report') => (
+  String(sheetName || 'Report').replace(/[:\\/?*\[\]]/g, '').slice(0, 31) || 'Report'
+);
+
+const sanitizeFilename = (rawName, fallback = 'Report') => {
+  const safeName = String(rawName || fallback).replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '');
+  return safeName || fallback;
+};
+
+const sanitizeCellValue = (val) => {
+  if (typeof val !== 'string') return val;
+  const trimmed = val.trimStart();
+  if (/^[=+\-@]/.test(trimmed)) {
+    return `'${val}`;
+  }
+  return val;
+};
+
+const sanitizeRow = (row = {}) => {
+  const out = {};
+  for (const [k, v] of Object.entries(row || {})) {
+    out[k] = sanitizeCellValue(v);
+  }
+  return out;
+};
+
+exports.exportToExcel = (data = [], sheetName = 'Report', filePath) => {
+  const safeRows = Array.isArray(data) ? data.map(sanitizeRow) : [];
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.json_to_sheet(data);
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  const ws = XLSX.utils.json_to_sheet(safeRows.length ? safeRows : [{}]);
+  XLSX.utils.book_append_sheet(wb, ws, sanitizeSheetName(sheetName));
   XLSX.writeFile(wb, filePath);
   return filePath;
 };
@@ -17,33 +44,37 @@ exports.exportToExcel = (data, sheetName, filePath) => {
  * @param {String} [opts.sheetName='Report']
  * @param {String} opts.filename - filename without extension
  */
-exports.exportReportToExcel = (res, { rows, totals, sheetName = 'Report', filename }) => {
-  const data = totals ? [...rows, totals] : rows;
+exports.exportReportToExcel = (res, { rows = [], totals, sheetName = 'Report', filename = 'Report' } = {}) => {
+  const rawData = totals ? [...rows, totals] : rows;
+  const data = rawData.map(sanitizeRow);
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.json_to_sheet(data.length ? data : [{}]);
 
-  // Auto-size columns roughly based on content length
+  // Auto-size columns safely without spreading potentially large arrays into Math.max
   if (data.length) {
     const headers = Object.keys(data[0]);
-    ws['!cols'] = headers.map((h) => ({
-      wch: Math.min(40, Math.max(h.length, ...data.map((r) => String(r[h] ?? '').length)) + 2),
-    }));
+    ws['!cols'] = headers.map((h) => {
+      const maxLen = data.reduce((max, r) => Math.max(max, String(r[h] ?? '').length), h.length);
+      return { wch: Math.min(40, maxLen + 2) };
+    });
   }
 
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  const safeSheet = sanitizeSheetName(sheetName);
+  XLSX.utils.book_append_sheet(wb, ws, safeSheet);
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 
+  const safeName = sanitizeFilename(filename, 'Report');
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename=${filename.replace(/\s+/g, '_')}.xlsx`);
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.xlsx"`);
   res.send(buffer);
 };
 
-exports.formatSalesForExport = (sales) => {
-  return sales.map(s => ({
+exports.formatSalesForExport = (sales = []) => {
+  return sales.map((s) => ({
     'Invoice #': s.invoiceNumber,
     'Date': new Date(s.createdAt).toLocaleDateString(),
     'Customer': s.customer?.name || 'Walk-in',
-    'Items': s.items.length,
+    'Items': Array.isArray(s.items) ? s.items.length : 0,
     'Subtotal': s.subtotal,
     'Discount': s.discount,
     'Tax': s.tax,
@@ -53,8 +84,8 @@ exports.formatSalesForExport = (sales) => {
   }));
 };
 
-exports.formatProductsForExport = (products) => {
-  return products.map(p => ({
+exports.formatProductsForExport = (products = []) => {
+  return products.map((p) => ({
     'Name': p.name,
     'SKU': p.sku,
     'Category': p.category?.name || '',
@@ -62,12 +93,12 @@ exports.formatProductsForExport = (products) => {
     'Cost': p.cost,
     'Stock': p.stock,
     'Min Stock': p.minimumStock,
-    'Status': p.stock <= p.minimumStock ? 'Low Stock' : 'In Stock',
+    'Status': p.stock === 0 ? 'Out of Stock' : p.stock <= p.minimumStock ? 'Low Stock' : 'In Stock',
   }));
 };
 
-exports.formatCustomersForExport = (customers) => {
-  return customers.map(c => ({
+exports.formatCustomersForExport = (customers = []) => {
+  return customers.map((c) => ({
     'Name': c.name,
     'Phone': c.phone,
     'Email': c.email,
@@ -77,14 +108,15 @@ exports.formatCustomersForExport = (customers) => {
   }));
 };
 
-exports.formatPurchasesForExport = (purchases) => {
-  return purchases.map(p => ({
+exports.formatPurchasesForExport = (purchases = []) => {
+  return purchases.map((p) => ({
     'Order #': p.orderNumber,
     'Supplier': p.supplier?.name || '',
     'Date': new Date(p.purchaseDate).toLocaleDateString(),
-    'Items': p.items.length,
+    'Items': Array.isArray(p.items) ? p.items.length : 0,
     'Total Cost': p.totalCost,
     'Payment': p.paymentStatus,
     'Status': p.status,
   }));
 };
+
