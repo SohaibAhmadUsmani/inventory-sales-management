@@ -10,6 +10,10 @@
 [![Accounting](https://img.shields.io/badge/Valuation-Moving%20Average%20Cost%20(AVCO)-0D9488)](#13-core-accounting-inventory--transactional-business-logic)
 [![License](https://img.shields.io/badge/Status-Production%20Ready-22C55E)](#)
 
+<p align="center">
+  <img src="./splash-screen.png" alt="InventoryHub Splash & Login Screen" width="100%" />
+</p>
+
 ---
 
 ## Table of Contents
