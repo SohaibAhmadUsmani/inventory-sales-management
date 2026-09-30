@@ -6,7 +6,21 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/api': 'http://localhost:5000',
+      '/api': {
+        target: 'http://localhost:5000',
+        changeOrigin: true,
+        timeout: 30000,
+        proxyTimeout: 30000,
+      },
+      '/uploads': {
+        target: 'http://localhost:5000',
+        changeOrigin: true,
+        timeout: 30000,
+        proxyTimeout: 30000,
+      },
     },
+  },
+  build: {
+    chunkSizeWarningLimit: 1000,
   },
 });
